@@ -71,7 +71,7 @@ internal static class Program
           laya <command> [options]
 
         COMMANDS
-          download      Fetch a checkpoint from Hugging Face
+          download      Fetch a checkpoint from the model host (or Hugging Face)
           predict       Answer a question set about some state
           route         Show which checkpoint a state would route to (loads nothing)
           presets       List the built-in question sets
@@ -82,6 +82,7 @@ internal static class Program
 
         COMMON OPTIONS
           --model <name>        english | multilingual | typed-decisions   (default: english)
+          --source <where>      host | hub   (default: host — https://models.curiosity.ai/laya)
           --standalone          Take --model from its own repo rather than the bundle repo
           --repo <id>           A specific Hugging Face repo id, instead of --model
           --subfolder <path>    Checkpoint subfolder inside --repo
@@ -92,6 +93,7 @@ internal static class Program
 
         EXAMPLES
           laya download --model english --cache ./artifacts/models
+          laya download --model multilingual --source hub
           laya download --repo convaiinnovations/laya-typed-decisions
           laya predict --model-dir ./artifacts/models/english --preset triage \
                        --text "I was charged twice and nobody answers"
@@ -105,19 +107,7 @@ internal static class Program
 
     private static int Download(CommandLine options)
     {
-        var spec = ResolveSpec(options);
-        string? cache = options.Value("cache");
-
-        Console.WriteLine($"Downloading {spec} …");
-        using var downloader = new HuggingFaceDownloader(options.Value("token"));
-        var progress = new ConsoleProgress();
-        string root = downloader.SnapshotAsync(spec.Repo, cache,
-                include: HuggingFaceDownloader.CheckpointFilter(spec.Subfolder), progress: progress)
-            .GetAwaiter().GetResult();
-        progress.Finish();
-
-        string directory = spec.Subfolder is null ? root : Path.Combine(root, spec.Subfolder);
-        Console.WriteLine($"Ready: {directory}");
+        Console.WriteLine($"Ready: {DownloadCheckpoint(options)}");
         return 0;
     }
 
@@ -257,30 +247,45 @@ internal static class Program
         return catalogue[name];
     }
 
-    private static Agent OpenAgent(CommandLine options)
-    {
-        if (options.Value("model-dir") is string directory) return Agent.FromDirectory(directory);
-
-        var spec = ResolveSpec(options);
-        var progress = new ConsoleProgress();
-        var agent = Agent.Load(spec.Repo, spec.Subfolder, options.Value("token"), options.Value("cache"), progress);
-        progress.Finish();
-        return agent;
-    }
+    private static Agent OpenAgent(CommandLine options) => Agent.FromDirectory(ModelDirectory(options));
 
     private static string ModelDirectory(CommandLine options)
+        => options.Value("model-dir") is string directory ? directory : DownloadCheckpoint(options);
+
+    /// <summary>
+    /// Fetches the requested checkpoint if it is not cached and returns its directory.
+    ///
+    /// <para>The model host is the default source; <c>--source hub</c> — and any of the
+    /// hub-specific flags — takes the checkpoint from Hugging Face instead.</para>
+    /// </summary>
+    private static string DownloadCheckpoint(CommandLine options)
     {
-        if (options.Value("model-dir") is string directory) return directory;
+        var progress = new ConsoleProgress();
+        if (!UsesHub(options))
+        {
+            var checkpoint = RemoteCheckpoint.FromName(Router.Normalise(options.Value("model") ?? "english"));
+            Console.WriteLine($"Downloading {checkpoint.Name} from {checkpoint.BaseUri} …");
+            string cached = checkpoint.Prepare(options.Value("cache"), progress);
+            progress.Finish();
+            return cached;
+        }
 
         var spec = ResolveSpec(options);
+        Console.WriteLine($"Downloading {spec} …");
         using var downloader = new HuggingFaceDownloader(options.Value("token"));
-        var progress = new ConsoleProgress();
         string root = downloader.SnapshotAsync(spec.Repo, options.Value("cache"),
             include: HuggingFaceDownloader.CheckpointFilter(spec.Subfolder), progress: progress)
             .GetAwaiter().GetResult();
         progress.Finish();
         return spec.Subfolder is null ? root : Path.Combine(root, spec.Subfolder);
     }
+
+    /// <summary>The hub is used on request, and whenever a hub-only flag names what to fetch.</summary>
+    private static bool UsesHub(CommandLine options)
+        => string.Equals(options.Value("source"), "hub", StringComparison.OrdinalIgnoreCase)
+            || options.Has("standalone")
+            || options.Value("repo") is not null
+            || options.Value("subfolder") is not null;
 
     private static object? ReadState(CommandLine options)
     {

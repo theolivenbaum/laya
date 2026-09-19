@@ -22,6 +22,17 @@ tools/                 Python helper scripts used only to produce reference dump
 artifacts/             (gitignored) downloaded models and reference dumps
 ```
 
+## Packaging
+
+One package, `Laya`, published on every push to `main` with a CalVer version by the Azure
+DevOps pipeline in `.devops/azure-pipelines.yml` (`GeneratePackageOnBuild`, then
+`NuGetCommand@2` push through the `nuget-curiosity-org` service connection). **No model data is packaged.** `RemoteCheckpoint` downloads a
+checkpoint's five files on demand from `https://models.curiosity.ai/laya/`, laid out as
+`<checkpoint>/<revision>/<file>` — English at the root, the other two under `multilingual/` and
+`typed-decisions/`, revision `main` — into `<cache>/models.curiosity.ai/<name>/<revision>/`, which
+is the layout `Agent.FromDirectory` expects. `LAYA_MODEL_BASE_URL` overrides the host; the
+Hugging Face path (`Agent.Load`, `laya download --source hub`) stays as it was.
+
 ## Ground truth: the model
 
 Three checkpoints, published twice: bundled in `convaiinnovations/laya`, and one repo each

@@ -5,77 +5,75 @@
   </picture>
 </p>
 
-**Multilingual, non-autoregressive System 1 decision engine — for .NET.**
-Typed decisions over 100+ languages in a single forward pass, with calibrated probabilities, on
-managed CPU SIMD. No Python, no PyTorch, no native dependency.
+**Typed decisions for .NET, in one forward pass — no Python, no PyTorch, no native dependency.**
 
+[![NuGet](https://img.shields.io/nuget/v/Laya?color=004880&label=NuGet)](https://www.nuget.org/packages/Laya)
 [![License](https://img.shields.io/badge/License-Apache%202.0-green.svg)](https://opensource.org/licenses/Apache-2.0)
 [![.NET](https://img.shields.io/badge/.NET-10%20%7C%2011-512BD4)](https://dotnet.microsoft.com/)
 [![Model](https://img.shields.io/badge/%F0%9F%A4%97%20Model-convaiinnovations%2Flaya-blue)](https://huggingface.co/convaiinnovations/laya)
 
-Laya answers typed questions (`choice`, `score`, `noul`) about any state — text, an email, a ticket,
-a JSON document — in **one forward pass per question set**. Nothing is generated, so there is
-nothing to parse and nothing to hallucinate; every answer comes back as a distribution with a
-calibrated confidence.
+`Laya` is a C# library that answers **typed questions about a piece of state** — a message, an
+email, a ticket, a JSON document — and returns a calibrated probability distribution for each
+answer. Ask five questions about one ticket and you get five answers back in a single call, in
+roughly the time one small classification takes.
 
-This repository is the C# port. The original Python implementation is preserved verbatim under
-[`.reference/`](.reference/) and is the behavioural specification the port is tested against —
-layer by layer, see [Parity](#parity).
+Nothing is generated. There is no prompt to tune, no JSON to parse, no schema to validate, and
+nothing to hallucinate: the model scores the options *you* define and hands back numbers.
 
----
+```csharp
+using Laya;
+using Laya.Io;
+using Laya.Runtime;
 
-## Status
+using var agent = RemoteCheckpoint.English.Load();
 
-| | |
-|---|---|
-| Checkpoints | `english`, `multilingual`, `typed-decisions` — all three run |
-| Parity with PyTorch | every encoder layer, head layer, logit and answer, on all three checkpoints |
-| Tokenizers | byte-level BPE and SentencePiece-style BPE, exact against `transformers` |
-| Execution | CPU, managed SIMD (AVX2 / AVX-512 / NEON), multi-threaded |
-| Not ported | training, GPU execution |
+var result = agent.SystemOne("I was charged twice and nobody answers", Presets.Triage());
+
+result["intent"].Choice;          // "refund"
+result["frustration"].Score;      // 1.99  (expected level on the 0..3 legend)
+result["refund_requested"].Noul;  // 0.90  (probability the statement holds)
+result["intent"].Confidence;      // 0.48
+```
+
+It runs on the CPU, on managed SIMD (AVX2 / AVX-512 / NEON), and holds the model in your own
+process — no service to call, no per-token bill, no data leaving the machine.
+
+This is a C# implementation of [Laya](https://github.com/NandhaKishorM/laya) by Convai
+Innovations, verified tensor-by-tensor against the original PyTorch implementation.
 
 ---
 
 ## Install
 
-There is no package feed yet; build from source. The repository targets **.NET 10** and **.NET 11**
-— the `net11.0` target is added automatically when an 11.x SDK is installed, so a .NET 10 SDK
-builds it unchanged.
-
 ```bash
-git clone https://github.com/theolivenbaum/laya.git
-cd laya
-dotnet build Laya.slnx -c Release
+dotnet add package Laya
 ```
+
+Targets **.NET 10** and **.NET 11**. The package contains no model data: a checkpoint is
+downloaded on first use and cached, see [Checkpoints](#checkpoints).
 
 ---
 
-## Quickstart
+## What you can build with it
 
-```csharp
-using Laya;
-using Laya.Runtime;
+Each of these is one call, five answers, one model load:
 
-// Downloads the English checkpoint on first use (~840 MB) into ~/.cache/laya.
-using var agent = Agent.Load();
+| | |
+|---|---|
+| **Support triage** | intent, urgency, frustration, refund requested, churn risk |
+| **Email routing** | destination team, spam, phishing, urgency, needs a reply |
+| **LLM guardrails** | jailbreak, prompt injection, sensitive data, harm severity, topic |
+| **Content moderation** | toxicity, harassment, threats, spam, severity |
+| **Model routing** | how hard is this request, does it need tools, does it need a big model |
 
-var state = new List<KeyValuePair<string, object?>>
-{
-    new("from",    "user@acme.com"),
-    new("subject", "Duplicate charge on invoice #4411"),
-    new("body",    "Hi, we were billed twice for March. Please refund the duplicate today "
-                 + "or we will cancel our plan."),
-};
+Those five ship as `Presets`. Everything else is your own `QuestionSet`.
 
-var result = agent.SystemOne(state, Presets.Triage());
+---
 
-Console.WriteLine(result["intent"].Choice);              // refund
-Console.WriteLine(result["frustration"].Score);          // 1.91
-Console.WriteLine(result["churn_risk"].Noul);            // 0.95
-Console.WriteLine(result["intent"].Confidence);          // 0.62
-```
+## Questions and answers
 
-Questions are typed, and the type decides what comes back:
+A question has a type, an instruction, and — for `choice` and `score` — the options or levels it
+must decide between. The type decides what comes back.
 
 ```csharp
 var questions = new QuestionSet()
@@ -88,100 +86,192 @@ var questions = new QuestionSet()
     .Add("needs_reply", Question.Noul("Does the sender expect a reply?"));
 ```
 
-| type | answer | also returns |
-|---|---|---|
-| `choice` | the winning option key | a probability per option |
-| `score` | the expected level, `Σ i · p(i)` | a probability per level, and the level legend |
-| `noul` | the probability the statement holds | — |
+| type | `Answer` member | what it means | also returns |
+|---|---|---|---|
+| `choice` | `Choice` | the winning option key | `Probabilities`, one per option |
+| `score` | `Score` | the expected level, `Σ i · p(i)` | `Probabilities` and the level `Legend` |
+| `noul` | `Noul` | the probability the statement holds | — |
 
-Every answer carries a `Confidence` (normalised entropy) and an `Action.ActProbability` from the
-model's escalation head.
+Every answer also carries:
 
-### Routing between checkpoints
-
-The English checkpoint does not degrade gently off English — it collapses, confidently (0.100 on
-20-option Hindi intent, against 0.050 for random). `Router` detects the script first and the
-language second, and sends each request to a checkpoint that can read it:
+* `Confidence` — normalised entropy of the distribution, `1.0` when the model is certain.
+* `Action.ActProbability` — the model's own escalate-to-a-human signal, from a separate head.
+* `ProbabilityOf("refund")` — the calibrated probability of any single option.
 
 ```csharp
-using var router = new Router(maxLoaded: 2);
+foreach (var (id, answer) in result.Answers)
+{
+    Console.WriteLine($"{id}: {answer.Choice ?? answer.Score?.ToString() ?? answer.Noul?.ToString()} " +
+                      $"(confidence {answer.Confidence:P0})");
 
-router.Predict("I was charged twice",                 Presets.Triage());  // -> english
-router.Predict("Mein Konto wurde zweimal belastet",   Presets.Triage());  // -> multilingual
-router.Predict("請求書4411で二重に請求されました",         Presets.Triage());  // -> multilingual
+    if (answer.Probabilities is { } distribution)
+        foreach (var (option, p) in distribution) Console.WriteLine($"    {option,-16} {p:P1}");
+}
 
-// Routing on its own loads nothing and costs microseconds.
-var decision = router.Route("मुझसे दो बार शुल्क लिया गया", Presets.Triage());
-Console.WriteLine(decision.Reason);
-// non-Latin script (devanagari, 100% of letters); the English checkpoint cannot read it
+Console.WriteLine($"{result.Usage.InputTokens} input tokens, {result.Usage.OutputTokens} generated");
 ```
 
-A cold load costs seconds while detection costs microseconds, so a server that alternates languages
-should `Preload()` rather than let the LRU evict on every request.
+Write your own thresholds against the numbers rather than trusting a label:
 
-### Presets
+```csharp
+var answer = result["refund_requested"];
+if (answer.Noul > 0.9)                    AutoRefund(ticket);
+else if (answer.Action.ActProbability > 0.5) Escalate(ticket);
+else                                      Queue(ticket);
+```
 
-`Presets.Triage()`, `Presets.Email()`, `Presets.Guard()`, `Presets.Moderation()` and
-`Presets.ModelRouter()` are the shipped question sets — support triage, email and threat filtering,
-LLM input guardrails, content moderation, and model routing. `laya presets` prints them.
+### State can be anything
+
+A string, key-value pairs, or JSON — it is serialised into the sequence the same way the Python
+implementation does it, so field names are part of what the model reads. Name them well; the
+instructions can refer to them with backticks.
+
+```csharp
+// A string
+agent.SystemOne("I was charged twice", Presets.Triage());
+
+// Fields — order is preserved
+agent.SystemOne(new List<KeyValuePair<string, object?>>
+{
+    new("from",    "user@acme.com"),
+    new("subject", "Duplicate charge on invoice #4411"),
+    new("body",    "We were billed twice for March. Refund it or we cancel."),
+}, Presets.Triage());
+
+// JSON straight from a request body
+agent.SystemOne(JsonDocument.Parse(json).RootElement, Presets.Triage());
+
+// An email, with quoted replies, signatures and footers stripped first
+agent.SystemOne(EmailUtils.EmailState(subject, body, sender), Presets.Email());
+```
 
 ---
 
 ## Checkpoints
 
-| name | encoder | params | context | use it for |
-|---|---|---|---|---|
-| `english` | ModernBERT-large | 421M | 512 | English |
-| `multilingual` | mmBERT-base | 322M | 1024 | 100+ languages |
-| `typed-decisions` | ModernBERT-large | 421M | 1024 | the four typed-decisions workflows |
+Three checkpoints, all Apache-2.0, all downloaded on demand:
 
-They are published twice. [`convaiinnovations/laya`](https://huggingface.co/convaiinnovations/laya)
-bundles all three — English at the root, the other two in subfolders — and each also has its own
-repository: [`laya-multilingual`](https://huggingface.co/convaiinnovations/laya-multilingual) and
-[`laya-typed-decisions`](https://huggingface.co/convaiinnovations/laya-typed-decisions), where the
-same five files sit at the root. Either layout works, and only the checkpoint you ask for is
-fetched: the bundle is 2.3 GB, one checkpoint is 640–840 MB.
+| `RemoteCheckpoint` | encoder | params | context | download | use it for |
+|---|---|---|---|---|---|
+| `English` | ModernBERT-large | 421M | 512 tokens | 843 MB | English text, general questions |
+| `Multilingual` | mmBERT-base | 322M | 1024 tokens | 644 MB | 100+ languages, ~2× faster |
+| `TypedDecisions` | ModernBERT-large | 421M | 1024 tokens | 843 MB | the four typed-decisions workflows |
 
-```bash
-# From the bundle — downloads the multilingual subfolder and nothing else
-dotnet run --project src/Laya.Cli -- download --model multilingual --cache artifacts/models-cache
+`English` and `TypedDecisions` share an encoder and a head; they differ in what they were trained
+on and how much they can read. `TypedDecisions` is fine-tuned on four synthetic operational
+workflows — customer service, invoice processing, security incidents and agent-trace
+observability — and doubles the context to 1024 tokens. On that workflow benchmark it scores
+0.766 where `English` scores 0.362, below the 0.461 majority-class baseline; `English` is the one
+trained on the general English mix (AG News 0.947, BoolQ 0.830) and stays the default. So pick
+`TypedDecisions` deliberately, for those workflows — it is never selected automatically.
 
-# From its own repository
-dotnet run --project src/Laya.Cli -- download --model typed-decisions --standalone
-dotnet run --project src/Laya.Cli -- download --repo convaiinnovations/laya-typed-decisions
-```
+`English` does not degrade gently outside English, it collapses: 0.100 on 20-option Hindi intent
+against 0.050 for random guessing, while reporting high confidence. Use `Multilingual` or the
+`Router` for anything that is not reliably English.
 
-In code, `Agent.Load` takes the same two shapes, and `Router` has a catalogue for each:
+### Downloading and caching
 
 ```csharp
-using var fromBundle     = Agent.Load("convaiinnovations/laya", subfolder: "typed-decisions");
-using var fromOwnRepo    = Agent.Load("convaiinnovations/laya-typed-decisions");
-using var standaloneOnly = new Router(standaloneRepos: true);
+using Laya.Io;
+
+// Downloads on first use, then loads from the cache every time after.
+using var agent = RemoteCheckpoint.English.Load();
 ```
 
-Set `HF_TOKEN` for a gated or private repository. Downloads resume, and re-running is a no-op.
+Files come from `https://models.curiosity.ai/laya/` and land in `~/.cache/laya` (override with
+`$LAYA_HOME`, or `$HF_HOME/laya`). Interrupted downloads resume, a file already on disk is never
+re-fetched, and two processes starting at once share one download instead of racing.
+
+```csharp
+var checkpoint = RemoteCheckpoint.Multilingual;
+
+checkpoint.IsDownloaded();                       // is the cache warm?
+await checkpoint.PrepareAsync(                   // warm it at deploy time, with progress
+    progress: new Progress<DownloadProgress>(p =>
+        Console.WriteLine($"{p.File} {p.Fraction:P0}")),
+    cancellationToken: stoppingToken);
+
+checkpoint.BaseUri;                              // https://models.curiosity.ai/laya/multilingual/main/
+RemoteCheckpoint.FromName("typed-decisions");    // by name, for configuration
+```
+
+`LAYA_MODEL_BASE_URL` points the download at a mirror with the same
+`<checkpoint>/<revision>/<file>` layout. Alternatively, `Agent.Load()` fetches a checkpoint from
+the Hugging Face hub (set `HF_TOKEN` for a gated repository), and `Agent.FromDirectory(path)`
+loads one you shipped yourself.
+
+### In a long-lived service
+
+Loading a checkpoint reads ~840 MB and builds 1.57 GiB of fp32 weights, so do it once. Everything
+an `Agent` holds after that is read-only, and every call rents its own scratch from the array
+pool, so one instance serves the whole process.
+
+```csharp
+builder.Services.AddSingleton(_ => RemoteCheckpoint.English.Load());
+
+// Warm the cache before the first request instead of during it.
+await RemoteCheckpoint.English.PrepareAsync();
+```
+
+The kernels already use every core for a single call (`LAYA_THREADS`, or `--threads`, caps it), so
+throughput comes from batching questions into one `SystemOne` call rather than from calling it
+concurrently.
+
+---
+
+## Routing between languages
+
+`Router` detects the script first and the language second, then sends each request to a checkpoint
+that can read it — loading checkpoints lazily and evicting the least recently used one.
+
+```csharp
+using var router = new Router(maxLoaded: 2);
+
+router.Predict("I was charged twice",               Presets.Triage());  // -> english
+router.Predict("Mein Konto wurde zweimal belastet", Presets.Triage());  // -> multilingual
+router.Predict("請求書4411で二重に請求されました",       Presets.Triage());  // -> multilingual
+
+// Routing on its own loads nothing and costs microseconds.
+RouteDecision decision = router.Route("मुझसे दो बार शुल्क लिया गया");
+Console.WriteLine(decision.Model);   // multilingual
+Console.WriteLine(decision.Reason);  // non-Latin script (devanagari, 100% of letters); …
+```
+
+A cold load costs seconds while detection costs microseconds, so a server that alternates
+languages should `Preload()` rather than let the LRU evict on every request:
+
+```csharp
+using var router = new Router().Preload(["english", "multilingual"]);
+```
+
+`LanguageDetector.Analyse(state)` exposes the same detection on its own — script profile, guessed
+Latin language, and whether the text is English — with no model loaded at all.
 
 ---
 
 ## Command line
 
+The `Laya.Cli` project is a thin face over the library; everything it does is public API.
+
 ```
-laya download      Fetch a checkpoint from Hugging Face
+laya download      Fetch a checkpoint (from the model host, or --source hub)
 laya predict       Answer a question set about some state
 laya route         Show which checkpoint a state would route to (loads nothing)
 laya presets       List the built-in question sets
 laya tokenize      Tokenize text with a checkpoint's tokenizer
 laya dump-states   Write per-layer activations for parity checking
 laya bench         Time the forward pass
+laya profile       Stage timings, allocations and a sampling profile
 ```
 
 ```bash
-dotnet run --project src/Laya.Cli -c Release -- \
-    predict --model-dir artifacts/models/english --preset triage \
-            --text "I was charged twice and nobody answers"
+dotnet run --project src/Laya.Cli -c Release -- download --model english
 
 dotnet run --project src/Laya.Cli -c Release -- \
-    predict --model-dir artifacts/models/english \
+    predict --model english --preset triage --text "I was charged twice and nobody answers"
+
+dotnet run --project src/Laya.Cli -c Release -- \
+    predict --model english \
             --question 'urgent=noul:Is this time critical?' \
             --question 'team=choice:Who handles this?|billing,support,security' \
             --state-file ticket.json
@@ -209,7 +299,7 @@ compared in one pass rather than generated one token at a time.
 5. **Action head** — predicts whether to escalate, from the pooled `[CLS]` state plus four
    features of the option distribution.
 
-### Inside the port
+### Inside the implementation
 
 - **Sequences are concatenated, not padded.** All the questions in a set go through the encoder as
   one tall matrix, so the 421M parameters are read from memory once per call instead of once per
@@ -227,45 +317,35 @@ compared in one pass rather than generated one token at a time.
   vectors, so the kernel reaches for them directly. `LAYA_VECTOR_BITS=256` opts out.
 - **Everything computes in fp32.** The checkpoints are fp16 on disk and widened once at load,
   which is what PyTorch does on CPU too — and what the parity tolerances are measured against.
-  Keeping them fp16 in memory would halve the 1.57 GiB the weights occupy, but there is no
-  vectorized fp16-to-fp32 widening to lean on, and bf16 would cost more accuracy than the parity
-  budget allows.
 - **Scratch is rented, not allocated.** Every buffer a pass needs is the same size every time and
   dies immediately, so they come from the array pool. This is the difference between 144 MiB of
   garbage per call and 1.8 MiB.
 - **Attention keeps the thing being summed in the lanes.** A dot product per query-key pair ends
   in a horizontal reduction, and a forward pass has ~14 million of those pairs. The keys are
   gathered transposed, so adjacent keys sit in adjacent lanes and a score vector finishes with a
-  plain store; the value accumulation likewise holds its running total in registers across the
-  whole key loop. See [`AttentionKernels`](src/Laya/Numerics/AttentionKernels.cs).
+  plain store. See [`AttentionKernels`](src/Laya/Numerics/AttentionKernels.cs).
 
-### Performance
+---
+
+## Performance
 
 Measured on a 4-core Xeon @ 2.8 GHz with AVX-512, on the 5-question triage preset over a paragraph
-of state (404 tokens in total). PyTorch is the reference implementation in `.reference/` on the
-same machine and the same weights.
+of state (404 tokens in total). PyTorch is the original implementation on the same machine and the
+same weights.
 
 | | 1 thread | 4 threads |
 |---|---|---|
-| this port | **3.63 s** | 1.29 s |
+| this library | **3.63 s** | 1.29 s |
 | PyTorch 2.14 CPU (oneDNN) | 4.10 s | 1.23 s |
-| this port, before any optimization | 16.5 s | 4.9 s |
+| this library, before any optimization | 16.5 s | 4.9 s |
 
 Per call, in steady state: **1.8 MiB** allocated, **zero** GC collections, **2.0 GiB** working set
 (1.57 GiB of that is the fp32 weights).
 
-#### Where the time goes, and what is left
-
-The projection kernel is ~76% of a forward pass and runs at **103 GFLOP/s** single-threaded. That
-number only means something against this machine's actual roof, so it was measured: a loop of pure
-register-to-register 512-bit FMAs sustains **151.7 GFLOP/s**, because the core drops to 2.37 GHz
-under AVX-512 (the 256-bit roof is 89.5 GFLOP/s at the full 2.8 GHz). So the GEMM is at 68% of the
-roof, and the same instruction mix in isolation — L1-resident, no panel switching — reaches ~130.
-
-That bounds what is still available. Even a *perfect* GEMM would put the whole pass at ~2.7 s, and
-2x against PyTorch would require the entire forward pass, attention and normalization included, to
-sustain ~96% of the pure-FMA roof. That is not reachable in fp32; it would take lower-precision
-arithmetic, which this port deliberately does not do because parity is measured against fp32.
+The projection kernel is ~76% of a forward pass and runs at **103 GFLOP/s** single-threaded —
+68% of this machine's measured ceiling of 151.7 GFLOP/s for pure register-to-register 512-bit FMAs
+(the core drops to 2.37 GHz under AVX-512; the 256-bit roof is 89.5 GFLOP/s at the full 2.8 GHz).
+Even a *perfect* GEMM would put the whole pass at ~2.7 s, so what is left is bounded and small.
 
 | projection | shape | 1 thread | 4 threads |
 |---|---|---|---|
@@ -279,71 +359,80 @@ Reproduce any of it:
 ```bash
 # End to end, with per-stage timings, allocation totals and a sampling profile
 dotnet run --project src/Laya.Cli -c Release -- profile \
-    --model-dir artifacts/models/english --preset triage --text "…" --threads 1
+    --model english --preset triage --text "…" --threads 1
 
 # BenchmarkDotNet: the GEMM shapes, the elementwise kernels, the whole forward pass
 dotnet run --project benchmarks/Laya.Benchmarks -c Release -- --filter '*Gemm*'
-dotnet run --project benchmarks/Laya.Benchmarks -c Release -- --filter '*Forward*'
 ```
 
 `laya profile` needs no external tooling: stage timings come from the model itself, and the CPU
 sampling profile and allocation report are captured in-process through
 [`Memory.Introspect`](https://www.nuget.org/packages/Memory.Introspect/).
 
-GPU execution is out of scope for this port.
+GPU execution and training are out of scope; this library runs inference on the CPU.
 
 ---
 
-## Parity
+## Correctness
 
-The port is checked against the Python implementation tensor by tensor, not just on its answers.
+The answers are not "close enough" — the implementation is checked against the original PyTorch
+one tensor by tensor: every encoder layer, head layer, logit, action logit and final answer, on
+all three checkpoints. On the English checkpoint the worst per-layer deviation is ~3e-5 absolute
+against activations in the tens of thousands, and the answers agree to every reported digit. The
+tokenizers (byte-level BPE and SentencePiece-style BPE) match `transformers` exactly.
 
-```bash
-# 1. Dump reference tensors from PyTorch (needs torch + transformers)
-python tools/dump_reference.py --model-dir artifacts/models/english \
-    --text "I was charged twice" --preset triage --out artifacts/dumps/torch.json
-
-# 2. Dump the same tensors from the .NET implementation
-dotnet run --project src/Laya.Cli -c Release -- dump-states \
-    --model-dir artifacts/models/english \
-    --text "I was charged twice" --preset triage --out artifacts/dumps/dotnet.json
-
-# 3. Diff them
-python tools/compare_dumps.py artifacts/dumps/torch.json artifacts/dumps/dotnet.json
-```
-
-Golden dumps for all three checkpoints are committed under
-[`tests/Laya.Tests/Fixtures/`](tests/Laya.Tests/Fixtures), so `dotnet test` verifies parity without
-Python — it only needs the weights. Every encoder layer, head layer, logit, action logit and final
-answer is compared; on the English checkpoint the worst per-layer deviation is ~3e-5 absolute
-against activations in the tens of thousands, and the answers agree to every reported digit.
+Golden dumps live in [`tests/Laya.Tests/Fixtures/`](tests/Laya.Tests/Fixtures), so the parity
+suite runs without Python:
 
 ```bash
-dotnet test tests/Laya.Tests -c Release
+dotnet test tests/Laya.Tests -c Release     # tests needing weights skip themselves without them
 ```
 
-Tests that need weights skip themselves when `artifacts/models/` is empty; point
-`LAYA_TEST_MODELS` somewhere else to override.
+To regenerate them, [`tools/`](tools) has the PyTorch dump-and-compare scripts, and
+`laya dump-states` writes the same tensors from this side.
 
 ---
 
-## Repository layout
+## Building from source
+
+```bash
+git clone https://github.com/theolivenbaum/laya.git
+cd laya
+dotnet build Laya.slnx -c Release
+dotnet test  tests/Laya.Tests -c Release
+```
+
+The `net11.0` target is added automatically when an 11.x SDK is installed, so a .NET 10 SDK builds
+the repository unchanged; force it either way with `-p:LayaEnableNet11=true|false`.
 
 ```
-.reference/            the original Python package — the behavioural specification
-src/Laya/              the port: numerics, tokenizers, ModernBERT, decision head, runtime
+src/Laya/              the library: numerics, tokenizers, ModernBERT, decision head, runtime
 src/Laya.Cli/          the command line tool
 benchmarks/            BenchmarkDotNet suites for the kernels and the forward pass
 tests/Laya.Tests/      xunit tests, including the PyTorch parity fixtures
 tools/                 Python scripts that produce reference dumps
+.reference/            the original Python package, kept verbatim as the specification
 ```
 
 [`CLAUDE.md`](CLAUDE.md) documents the architecture that has to be reproduced exactly, and the
 traps that cost the most time. [`TODO.md`](TODO.md) tracks what is done and what is not.
 
+[`.devops/azure-pipelines.yml`](.devops/azure-pipelines.yml) builds the package on every push to
+`main` and pushes it to nuget.org with a CalVer version (`yy.M.<build id>`).
+
 ---
+
+## Credits
+
+Laya — the model, the method and the original Python implementation — is by
+**[Convai Innovations](https://github.com/NandhaKishorM/laya)**. The checkpoints are published on
+the [Hugging Face hub](https://huggingface.co/convaiinnovations/laya) under Apache-2.0, and this
+repository keeps the Python source verbatim under [`.reference/`](.reference/) as the behavioural
+specification it is tested against.
+
+This C# implementation is maintained by [Curiosity](https://curiosity.ai).
 
 ## License
 
 Apache-2.0, as the original. The model weights are published by Convai Innovations under the same
-license.
+license; see [`NOTICE`](NOTICE) for the attributions that travel inside the package.

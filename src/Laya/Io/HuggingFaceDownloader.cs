@@ -150,83 +150,17 @@ public sealed class HuggingFaceDownloader : IDisposable
         return path => scoped.Contains(path);
     }
 
-    private async Task DownloadFileAsync(string repoId, string path, string destination, string revision,
+    private Task DownloadFileAsync(string repoId, string path, string destination, string revision,
         long expectedSize, IProgress<DownloadProgress>? progress, CancellationToken cancellationToken)
     {
-        string partial = destination + ".part";
-        long resumeFrom = File.Exists(partial) ? new FileInfo(partial).Length : 0;
-        if (resumeFrom > expectedSize && expectedSize > 0)
-        {
-            File.Delete(partial);
-            resumeFrom = 0;
-        }
-
         string url = $"{_endpoint}/{repoId}/resolve/{revision}/{Uri.EscapeDataString(path).Replace("%2F", "/", StringComparison.Ordinal)}";
-        using var request = new HttpRequestMessage(HttpMethod.Get, url);
-        if (resumeFrom > 0) request.Headers.Range = new RangeHeaderValue(resumeFrom, null);
-
-        using var response = await _http.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, cancellationToken)
-            .ConfigureAwait(false);
-        if (resumeFrom > 0 && response.StatusCode == HttpStatusCode.RequestedRangeNotSatisfiable)
-        {
-            // The partial file is already the whole file.
-            File.Move(partial, destination, overwrite: true);
-            progress?.Report(new DownloadProgress(path, expectedSize, expectedSize));
-            return;
-        }
-        await EnsureSuccessAsync(response, $"{repoId}/{path}", cancellationToken).ConfigureAwait(false);
-
-        bool appending = resumeFrom > 0 && response.StatusCode == HttpStatusCode.PartialContent;
-        if (!appending) resumeFrom = 0;
-
-        long total = expectedSize > 0
-            ? expectedSize
-            : (response.Content.Headers.ContentLength ?? 0) + resumeFrom;
-
-        await using (var input = await response.Content.ReadAsStreamAsync(cancellationToken).ConfigureAwait(false))
-        await using (var output = new FileStream(partial, appending ? FileMode.Append : FileMode.Create,
-                         FileAccess.Write, FileShare.None, 1 << 20, useAsync: true))
-        {
-            byte[] buffer = new byte[1 << 20];
-            long read = resumeFrom;
-            int n;
-            while ((n = await input.ReadAsync(buffer, cancellationToken).ConfigureAwait(false)) > 0)
-            {
-                await output.WriteAsync(buffer.AsMemory(0, n), cancellationToken).ConfigureAwait(false);
-                read += n;
-                progress?.Report(new DownloadProgress(path, read, total));
-            }
-        }
-
-        if (expectedSize > 0 && new FileInfo(partial).Length != expectedSize)
-        {
-            throw new IOException($"{path}: expected {expectedSize} bytes but received {new FileInfo(partial).Length}.");
-        }
-        File.Move(partial, destination, overwrite: true);
+        return HttpDownload.ToFileAsync(_http, url, destination, path, expectedSize, progress, cancellationToken,
+            authHint: " The repository may be gated or private; set HF_TOKEN to a token that can read it.");
     }
 
-    private static async Task EnsureSuccessAsync(HttpResponseMessage response, string what, CancellationToken cancellationToken)
-    {
-        if (response.IsSuccessStatusCode) return;
-        string body = string.Empty;
-        try
-        {
-            body = await response.Content.ReadAsStringAsync(cancellationToken).ConfigureAwait(false);
-        }
-        catch (HttpRequestException)
-        {
-            // The status code is the useful part; a failure to read the body must not mask it.
-        }
-
-        string hint = response.StatusCode switch
-        {
-            HttpStatusCode.Unauthorized or HttpStatusCode.Forbidden =>
-                " The repository may be gated or private; set HF_TOKEN to a token that can read it.",
-            HttpStatusCode.NotFound => " Check the repository id and revision.",
-            _ => string.Empty,
-        };
-        throw new HttpRequestException($"Hugging Face request for '{what}' failed: {(int)response.StatusCode} {response.ReasonPhrase}.{hint} {body}".TrimEnd());
-    }
+    private static Task EnsureSuccessAsync(HttpResponseMessage response, string what, CancellationToken cancellationToken)
+        => HttpDownload.EnsureSuccessAsync(response, what, cancellationToken,
+            authHint: " The repository may be gated or private; set HF_TOKEN to a token that can read it.");
 
     public void Dispose()
     {
