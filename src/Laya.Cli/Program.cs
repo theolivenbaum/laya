@@ -74,11 +74,16 @@ internal static class Program
 
         COMMON OPTIONS
           --model <name>        english | multilingual | typed-decisions   (default: english)
+          --standalone          Take --model from its own repo rather than the bundle repo
+          --repo <id>           A specific Hugging Face repo id, instead of --model
+          --subfolder <path>    Checkpoint subfolder inside --repo
           --model-dir <path>    Use a checkpoint already on disk instead of downloading
           --cache <path>        Download cache root (default: ~/.cache/laya or $LAYA_HOME)
+          --token <token>       Hugging Face token (default: $HF_TOKEN)
 
         EXAMPLES
           laya download --model english --cache ./artifacts/models
+          laya download --repo convaiinnovations/laya-typed-decisions
           laya predict --model-dir ./artifacts/models/english --preset triage \
                        --text "I was charged twice and nobody answers"
           laya route --text "Mein Konto wurde zweimal belastet"
@@ -89,8 +94,7 @@ internal static class Program
 
     private static int Download(CommandLine options)
     {
-        string name = Router.Normalise(options.Value("model") ?? "english");
-        var spec = Router.DefaultModels[name];
+        var spec = ResolveSpec(options);
         string? cache = options.Value("cache");
 
         Console.WriteLine($"Downloading {spec} …");
@@ -127,7 +131,8 @@ internal static class Program
     {
         object? state = ReadState(options);
         var questions = options.Has("preset") || options.Has("question") ? ReadQuestions(options) : null;
-        var router = new Router(autoTaskDetection: options.Has("auto-task"));
+        var router = new Router(autoTaskDetection: options.Has("auto-task"),
+            standaloneRepos: options.Has("standalone"));
         var decision = router.Route(state, questions, options.Value("force-model"), options.Value("task"),
             options.Value("lang"));
         Console.WriteLine(JsonSerializer.Serialize(decision, Json));
@@ -221,12 +226,29 @@ internal static class Program
         return 0;
     }
 
+    /// <summary>
+    /// Which checkpoint the command should use.
+    ///
+    /// <para>The three checkpoints are published twice: bundled in <c>convaiinnovations/laya</c>,
+    /// where two of them sit in a subfolder, and each in its own repo, where the same files sit at
+    /// the root. <c>--repo</c> names a repository directly; <c>--standalone</c> picks the separate
+    /// repo for a named checkpoint; otherwise the bundle is used and only the requested subfolder
+    /// is downloaded.</para>
+    /// </summary>
+    private static ModelSpec ResolveSpec(CommandLine options)
+    {
+        if (options.Value("repo") is string repo) return new ModelSpec(repo, options.Value("subfolder"));
+
+        string name = Router.Normalise(options.Value("model") ?? "english");
+        var catalogue = options.Has("standalone") ? Router.StandaloneModels : Router.DefaultModels;
+        return catalogue[name];
+    }
+
     private static Agent OpenAgent(CommandLine options)
     {
         if (options.Value("model-dir") is string directory) return Agent.FromDirectory(directory);
 
-        string name = Router.Normalise(options.Value("model") ?? "english");
-        var spec = Router.DefaultModels[name];
+        var spec = ResolveSpec(options);
         var progress = new ConsoleProgress();
         var agent = Agent.Load(spec.Repo, spec.Subfolder, options.Value("token"), options.Value("cache"), progress);
         progress.Finish();
@@ -237,8 +259,7 @@ internal static class Program
     {
         if (options.Value("model-dir") is string directory) return directory;
 
-        string name = Router.Normalise(options.Value("model") ?? "english");
-        var spec = Router.DefaultModels[name];
+        var spec = ResolveSpec(options);
         using var downloader = new HuggingFaceDownloader(options.Value("token"));
         var progress = new ConsoleProgress();
         string root = downloader.SnapshotAsync(spec.Repo, options.Value("cache"),

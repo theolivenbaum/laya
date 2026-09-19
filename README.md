@@ -129,16 +129,34 @@ LLM input guardrails, content moderation, and model routing. `laya presets` prin
 
 ## Checkpoints
 
-All three live in one Hugging Face repository; only the one you ask for is downloaded.
-
 | name | encoder | params | context | use it for |
 |---|---|---|---|---|
 | `english` | ModernBERT-large | 421M | 512 | English |
 | `multilingual` | mmBERT-base | 322M | 1024 | 100+ languages |
 | `typed-decisions` | ModernBERT-large | 421M | 1024 | the four typed-decisions workflows |
 
+They are published twice. [`convaiinnovations/laya`](https://huggingface.co/convaiinnovations/laya)
+bundles all three — English at the root, the other two in subfolders — and each also has its own
+repository: [`laya-multilingual`](https://huggingface.co/convaiinnovations/laya-multilingual) and
+[`laya-typed-decisions`](https://huggingface.co/convaiinnovations/laya-typed-decisions), where the
+same five files sit at the root. Either layout works, and only the checkpoint you ask for is
+fetched: the bundle is 2.3 GB, one checkpoint is 640–840 MB.
+
 ```bash
+# From the bundle — downloads the multilingual subfolder and nothing else
 dotnet run --project src/Laya.Cli -- download --model multilingual --cache artifacts/models-cache
+
+# From its own repository
+dotnet run --project src/Laya.Cli -- download --model typed-decisions --standalone
+dotnet run --project src/Laya.Cli -- download --repo convaiinnovations/laya-typed-decisions
+```
+
+In code, `Agent.Load` takes the same two shapes, and `Router` has a catalogue for each:
+
+```csharp
+using var fromBundle     = Agent.Load("convaiinnovations/laya", subfolder: "typed-decisions");
+using var fromOwnRepo    = Agent.Load("convaiinnovations/laya-typed-decisions");
+using var standaloneOnly = new Router(standaloneRepos: true);
 ```
 
 Set `HF_TOKEN` for a gated or private repository. Downloads resume, and re-running is a no-op.

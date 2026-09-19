@@ -24,7 +24,10 @@ artifacts/             (gitignored) downloaded models and reference dumps
 
 ## Ground truth: the model
 
-Three checkpoints live in one Hugging Face repo, `convaiinnovations/laya`:
+Three checkpoints, published twice: bundled in `convaiinnovations/laya`, and one repo each
+(`convaiinnovations/laya-multilingual`, `convaiinnovations/laya-typed-decisions`). In the bundle
+English is at the root and the other two are subfolders; in a standalone repo the same five files
+are at the root, so `HuggingFaceDownloader.CheckpointFilter(null)` serves both. The bundle layout:
 
 | name            | subfolder          | encoder                    | params | max_len |
 |-----------------|--------------------|----------------------------|--------|---------|
@@ -32,9 +35,11 @@ Three checkpoints live in one Hugging Face repo, `convaiinnovations/laya`:
 | multilingual    | `multilingual`     | `jhu-clsp/mmBERT-base`     | 322M   | 1024    |
 | typed-decisions | `typed-decisions`  | `answerdotai/ModernBERT-large` | 421M | 1024 |
 
-Each checkpoint directory holds `rl_agent_config.json`, `encoder/config.json`,
+Each checkpoint directory holds exactly five files: `rl_agent_config.json`, `encoder/config.json`,
 `model.safetensors` (fp16 weights, three fp32 scalars for `temperature`), and
-`tokenizer/tokenizer.json` + `tokenizer/tokenizer_config.json`.
+`tokenizer/tokenizer.json` + `tokenizer/tokenizer_config.json`. The root-level names are prefixes
+of the subfolder copies, so the download filter must match them **exactly** — a `StartsWith` there
+pulls the whole 2.3 GB bundle.
 
 ### Architecture that must be reproduced exactly
 

@@ -50,6 +50,7 @@ Status key: `[ ]` not started · `[~]` in progress · `[x]` done
 
 ## 5. CLI
 - [x] `download`, `predict`, `route`, `presets`, `dump-states`, `bench`, `tokenize`
+- [x] `--standalone` / `--repo` / `--subfolder`, so the per-checkpoint repos are reachable too
 
 ## 6. Tests & polish
 - [x] Port `.reference/tests/*` to xunit (criteria rendering, router, e2e)
