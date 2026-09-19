@@ -12,16 +12,8 @@
   </ItemGroup>
   <ItemGroup>
     <None Include="Fixtures/**" CopyToOutputDirectory="PreserveNewest" LinkBase="Fixtures" />
-    <!-- A stand-in for a checkpoint package's payload, so PackagedCheckpoint can be exercised
-         end to end (extract + weights download) without an 800 MB file. -->
-    <EmbeddedResource Include="Fixtures/packaged/rl_agent_config.json" LogicalName="laya/checkpoint/rl_agent_config.json" />
-    <EmbeddedResource Include="Fixtures/packaged/tokenizer/tokenizer.json" LogicalName="laya/checkpoint/tokenizer/tokenizer.json" />
   </ItemGroup>
   <ItemGroup>
     <ProjectReference Include="../../src/Laya/Laya.csproj" />
-    <!-- The checkpoint packages are tested for their embedded payload, not for their weights. -->
-    <ProjectReference Include="../../src/Laya.Model.English/Laya.Model.English.csproj" />
-    <ProjectReference Include="../../src/Laya.Model.Multilingual/Laya.Model.Multilingual.csproj" />
-    <ProjectReference Include="../../src/Laya.Model.TypedDecisions/Laya.Model.TypedDecisions.csproj" />
   </ItemGroup>
 </Project>

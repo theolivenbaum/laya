@@ -12,9 +12,8 @@ dependency.
 using Laya;
 using Laya.Runtime;
 
-// The Laya.Model.English package: config and tokenizer ship with it, the weights are
-// downloaded once on first use.
-using var agent = LayaEnglish.Load();
+// Downloads the English checkpoint on first use (~843 MB) into ~/.cache/laya.
+using var agent = RemoteCheckpoint.English.Load();
 
 var result = agent.SystemOne("We were billed twice for March, please refund it.", Presets.Triage());
 
@@ -24,18 +23,24 @@ Console.WriteLine(result["intent"].Confidence);    // normalised entropy of the 
 
 ## Checkpoints
 
-This package is the engine. The checkpoints ship separately — each one embeds its config and
-tokenizer and downloads its weights once, on first use, into `~/.cache/laya`
-(or `$LAYA_HOME` / `$HF_HOME/laya`):
+No model data ships in this package. A checkpoint is downloaded on first use from
+<https://models.curiosity.ai/laya/> into `~/.cache/laya` (or `$LAYA_HOME`, or `$HF_HOME/laya`)
+and reused from there afterwards:
 
-| package | encoder | params | max tokens | weights |
+| `RemoteCheckpoint` | encoder | params | max tokens | download |
 |---|---|---|---|---|
-| `Laya.Model.English` | ModernBERT-large | 421M | 512 | 843 MB |
-| `Laya.Model.Multilingual` | mmBERT-base | 322M | 1024 | 644 MB |
-| `Laya.Model.TypedDecisions` | ModernBERT-large | 421M | 1024 | 843 MB |
+| `English` | ModernBERT-large | 421M | 512 | 843 MB |
+| `Multilingual` | mmBERT-base | 322M | 1024 | 644 MB |
+| `TypedDecisions` | ModernBERT-large | 421M | 1024 | 843 MB |
 
-`Agent.Load()` still downloads a checkpoint straight from the Hugging Face hub if you would
-rather not take a model package, and `Agent.FromDirectory(path)` loads one from disk.
+```csharp
+RemoteCheckpoint.Multilingual.Prepare(progress: new Progress<DownloadProgress>(p => …));
+RemoteCheckpoint.Multilingual.IsDownloaded();   // cached? then Load() never touches the network
+```
+
+Downloads resume where they stopped, and two processes starting at once share one download.
+`LAYA_MODEL_BASE_URL` points them at a mirror with the same layout. `Agent.Load()` fetches a
+checkpoint from the Hugging Face hub instead, and `Agent.FromDirectory(path)` loads one from disk.
 
 ## Links
 

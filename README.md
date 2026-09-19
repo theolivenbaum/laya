@@ -39,25 +39,24 @@ layer by layer, see [Parity](#parity).
 ## Install
 
 ```bash
-dotnet add package Laya                    # the engine
-dotnet add package Laya.Model.English      # + a checkpoint: .English, .Multilingual, .TypedDecisions
+dotnet add package Laya
 ```
 
-The checkpoint packages carry the config and tokenizer files; `model.safetensors` is far too
-large for a package, so it is downloaded once on first use from
-<https://models.curiosity.ai/laya/> into `~/.cache/laya` (or `$LAYA_HOME`, or `$HF_HOME/laya`).
-`LAYA_MODEL_BASE_URL` points that download at a mirror, and `LayaEnglish.Prepare()` warms the
-cache during deployment rather than on the first request.
+The package is the engine only — no model data. A checkpoint is downloaded on first use from
+<https://models.curiosity.ai/laya/> into `~/.cache/laya` (or `$LAYA_HOME`, or `$HF_HOME/laya`)
+and reused from there afterwards:
 
-| package | encoder | params | max tokens | weights |
+| `RemoteCheckpoint` | encoder | params | max tokens | download |
 |---|---|---|---|---|
-| [`Laya`](https://www.nuget.org/packages/Laya) | — | — | — | — |
-| [`Laya.Model.English`](https://www.nuget.org/packages/Laya.Model.English) | ModernBERT-large | 421M | 512 | 843 MB |
-| [`Laya.Model.Multilingual`](https://www.nuget.org/packages/Laya.Model.Multilingual) | mmBERT-base | 322M | 1024 | 644 MB |
-| [`Laya.Model.TypedDecisions`](https://www.nuget.org/packages/Laya.Model.TypedDecisions) | ModernBERT-large | 421M | 1024 | 843 MB |
+| `English` | ModernBERT-large | 421M | 512 | 843 MB |
+| `Multilingual` | mmBERT-base | 322M | 1024 | 644 MB |
+| `TypedDecisions` | ModernBERT-large | 421M | 1024 | 843 MB |
 
-`Agent.Load()` still pulls a checkpoint straight from the Hugging Face hub if you would rather
-not take a model package.
+Downloads resume where they stopped, and two processes starting at once share one download rather
+than racing. `RemoteCheckpoint.English.Prepare()` warms the cache during deployment rather than on
+the first request, `IsDownloaded()` says whether it is warm, and `LAYA_MODEL_BASE_URL` points the
+download at a mirror with the same layout. `Agent.Load()` still pulls a checkpoint straight from
+the Hugging Face hub, and `laya download --source hub` does the same on the command line.
 
 Or build from source. The repository targets **.NET 10** and **.NET 11** — the `net11.0` target
 is added automatically when an 11.x SDK is installed, so a .NET 10 SDK builds it unchanged.
@@ -76,8 +75,8 @@ dotnet build Laya.slnx -c Release
 using Laya;
 using Laya.Runtime;
 
-// Downloads the English checkpoint on first use (~840 MB) into ~/.cache/laya.
-using var agent = LayaEnglish.Load();   // or Agent.Load() to fetch it from the hub instead
+// Downloads the English checkpoint on first use (~843 MB) into ~/.cache/laya.
+using var agent = RemoteCheckpoint.English.Load();   // or Agent.Load() to fetch it from the hub
 
 var state = new List<KeyValuePair<string, object?>>
 {
@@ -353,7 +352,6 @@ Tests that need weights skip themselves when `artifacts/models/` is empty; point
 .reference/            the original Python package — the behavioural specification
 src/Laya/              the port: numerics, tokenizers, ModernBERT, decision head, runtime
 src/Laya.Cli/          the command line tool
-src/Laya.Model.*/      the three checkpoint packages: config and tokenizer embedded, weights fetched
 benchmarks/            BenchmarkDotNet suites for the kernels and the forward pass
 tests/Laya.Tests/      xunit tests, including the PyTorch parity fixtures
 tools/                 Python scripts that produce reference dumps
@@ -366,16 +364,14 @@ traps that cost the most time. [`TODO.md`](TODO.md) tracks what is done and what
 
 ## Publishing
 
-[`.github/workflows/nuget.yml`](.github/workflows/nuget.yml) builds, tests and packs all four
-packages on every push to `main` and publishes them to nuget.org under one shared CalVer version
-(`yy.M.<run number>`), so a model package always depends on the engine build it was produced
-with. Pull requests run the same job without the publish step. The only setup it needs is a
+[`.github/workflows/nuget.yml`](.github/workflows/nuget.yml) builds, tests and packs the package
+on every push to `main` and publishes it to nuget.org with a CalVer version (`yy.M.<run
+number>`). Pull requests run the same job without the publish step. The only setup it needs is a
 nuget.org API key in the `NUGET_API_KEY` repository secret.
 
-The checkpoint packages fetch their config and tokenizer files at build time (cached in
-`artifacts/checkpoint-assets/`, gitignored) and embed them as resources named
-`laya/checkpoint/<path>`; `-p:LayaCheckpointSourceUrl=` points that at a mirror. The weights are
-never packaged.
+No model data is packaged: the checkpoints live on <https://models.curiosity.ai/laya/>, laid out
+as `<checkpoint>/<revision>/<file>` — the English checkpoint at the root, the other two under
+`multilingual/` and `typed-decisions/` — and `RemoteCheckpoint` downloads them on demand.
 
 ---
 

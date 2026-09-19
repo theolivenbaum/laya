@@ -17,21 +17,20 @@ is right unless there is a written note here saying otherwise.
 .reference/            original Python package, tests, notebook, packaging (read-only spec)
 src/Laya/              the port: numerics, tokenizer, ModernBERT, decision head, runtime
 src/Laya.Cli/          `laya` command line tool (predict, route, download, dump, bench)
-src/Laya.Model.*/      NuGet checkpoint packages (english, multilingual, typed-decisions)
 tests/Laya.Tests/      xunit tests, including parity tests against dumped PyTorch tensors
 tools/                 Python helper scripts used only to produce reference dumps
-artifacts/             (gitignored) downloaded models, reference dumps, packaging assets
+artifacts/             (gitignored) downloaded models and reference dumps
 ```
 
 ## Packaging
 
-Four packages, one shared CalVer version per CI run (`.github/workflows/nuget.yml`): `Laya` and
-`Laya.Model.{English,Multilingual,TypedDecisions}`. A model package embeds the checkpoint's four
-non-weight files as resources named `laya/checkpoint/<relative path>` — fetched at build time into
-`artifacts/checkpoint-assets/<name>/` by `src/LayaModelPackage.props` — and `PackagedCheckpoint`
-materialises them into the usual cache directory, then downloads `model.safetensors` from
-`https://models.curiosity.ai/laya/` (override with `LAYA_MODEL_BASE_URL`). The weights are never
-in a package: `dotnet pack` must stay under a megabyte per package plus the tokenizer.
+One package, `Laya`, published on every push to `main` with a CalVer version
+(`.github/workflows/nuget.yml`). **No model data is packaged.** `RemoteCheckpoint` downloads a
+checkpoint's five files on demand from `https://models.curiosity.ai/laya/`, laid out as
+`<checkpoint>/<revision>/<file>` — English at the root, the other two under `multilingual/` and
+`typed-decisions/`, revision `main` — into `<cache>/models.curiosity.ai/<name>/<revision>/`, which
+is the layout `Agent.FromDirectory` expects. `LAYA_MODEL_BASE_URL` overrides the host; the
+Hugging Face path (`Agent.Load`, `laya download --source hub`) stays as it was.
 
 ## Ground truth: the model
 

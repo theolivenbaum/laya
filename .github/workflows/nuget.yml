@@ -1,15 +1,13 @@
 name: NuGet
 
-# Builds, tests and packs the four packages — Laya, Laya.Model.English,
-# Laya.Model.Multilingual, Laya.Model.TypedDecisions — and publishes them to nuget.org on
-# every push to main. Pull requests build and pack but never publish.
+# Builds, tests and packs the Laya package and publishes it to nuget.org on every push to
+# main. Pull requests build and pack but never publish.
 #
-# Set up once: a nuget.org API key scoped to Laya* as the repository secret NUGET_API_KEY.
+# Set up once: a nuget.org API key for Laya as the repository secret NUGET_API_KEY.
 #
-# Every package in a run carries the same CalVer version (yy.M.<run number>), so the model
-# packages always depend on the Laya build they were produced with. The weights themselves are
-# not packaged: the model packages embed only config and tokenizer files and download
-# model.safetensors from https://models.curiosity.ai/laya/ on first use.
+# The package carries no model data at all — every checkpoint file, weights included, is
+# downloaded from https://models.curiosity.ai/laya/ into the user's cache on first use — so the
+# build needs nothing but the SDK, and the version is CalVer: yy.M.<run number>.
 
 on:
   push:
@@ -67,14 +65,6 @@ jobs:
           echo "version=$version" >> "$GITHUB_OUTPUT"
           echo "Packing $version"
 
-      # The checkpoint packages embed config and tokenizer files fetched from the model
-      # repository; caching them keeps a green build off the network.
-      - name: Cache checkpoint assets
-        uses: actions/cache@v4
-        with:
-          path: artifacts/checkpoint-assets
-          key: checkpoint-assets-v1
-
       - name: Restore
         run: dotnet restore Laya.slnx
 
@@ -85,7 +75,7 @@ jobs:
           -p:LayaEnableNet11=$LAYA_ENABLE_NET11
 
       # Parity tests need a checkpoint's weights in artifacts/ and skip themselves without one;
-      # everything else — tokenizer, sequence building, calibration, package payload — runs here.
+      # everything else — tokenizer, sequence building, calibration, the downloader — runs here.
       - name: Test
         run: >
           dotnet test tests/Laya.Tests -c Release --no-build
@@ -127,18 +117,10 @@ jobs:
           name: nupkg-${{ needs.pack.outputs.version }}
           path: artifacts/nupkg
 
-      # The engine goes first: the model packages depend on it at this exact version, and a
-      # consumer restoring between the two pushes should never see a model package alone.
+      # The .snupkg beside it is pushed with it.
       - name: Push Laya
         run: >
           dotnet nuget push "artifacts/nupkg/Laya.${{ needs.pack.outputs.version }}.nupkg"
-          --source https://api.nuget.org/v3/index.json
-          --api-key "${{ secrets.NUGET_API_KEY }}"
-          --skip-duplicate
-
-      - name: Push the checkpoint packages and symbols
-        run: >
-          dotnet nuget push "artifacts/nupkg/Laya.Model.*.nupkg"
           --source https://api.nuget.org/v3/index.json
           --api-key "${{ secrets.NUGET_API_KEY }}"
           --skip-duplicate

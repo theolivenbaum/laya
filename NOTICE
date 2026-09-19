@@ -20,11 +20,10 @@ specific language governing permissions and limitations under the License.
 --------------------------------------------------------------------------------
 Model checkpoints
 
-The Laya.Model.* packages embed the configuration and tokenizer files of the Laya
-decision checkpoints published at https://huggingface.co/convaiinnovations/laya
-(Apache-2.0). The weights themselves (model.safetensors) are not part of any
-package; they are downloaded on first use from https://models.curiosity.ai/laya/
-and remain subject to that same licence.
+No model data is part of this package. The Laya decision checkpoints are
+published at https://huggingface.co/convaiinnovations/laya (Apache-2.0) and
+mirrored at https://models.curiosity.ai/laya/, from where this software
+downloads them on first use; they remain subject to that licence.
 
 The checkpoints are trained on top of these base encoders:
 
