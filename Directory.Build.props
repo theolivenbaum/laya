@@ -22,11 +22,37 @@
     <EnableNETAnalyzers>true</EnableNETAnalyzers>
     <AnalysisLevel>latest</AnalysisLevel>
 
+    <!-- CI stamps a CalVer version (-p:Version=yy.M.<run>) across every package in a run; this
+         is what a local `dotnet pack` produces instead. -->
     <Version>0.3.3</Version>
-    <Authors>Convai Innovations</Authors>
-    <PackageLicenseExpression>Apache-2.0</PackageLicenseExpression>
-    <RepositoryUrl>https://github.com/theolivenbaum/laya</RepositoryUrl>
-    <RepositoryType>git</RepositoryType>
     <IsPackable>false</IsPackable>
   </PropertyGroup>
+
+  <!-- Package metadata shared by Laya and the three checkpoint packages. -->
+  <PropertyGroup>
+    <Authors>Curiosity GmbH, Convai Innovations</Authors>
+    <Company>Curiosity GmbH</Company>
+    <Product>Laya</Product>
+    <Copyright>(c) Copyright 2026 Curiosity GmbH - all rights reserved, Copyright (c) 2025 Convai Innovations (Laya)</Copyright>
+    <PackageLicenseExpression>Apache-2.0</PackageLicenseExpression>
+    <PackageProjectUrl>https://github.com/theolivenbaum/laya</PackageProjectUrl>
+    <RepositoryUrl>https://github.com/theolivenbaum/laya</RepositoryUrl>
+    <RepositoryType>git</RepositoryType>
+    <PackageIcon>icon.png</PackageIcon>
+    <PackageReadmeFile>README.md</PackageReadmeFile>
+    <PackageTags>laya;nlp;classification;routing;decision;modernbert;transformer;onnx-free;simd;cpu</PackageTags>
+    <PackageRequireLicenseAcceptance>false</PackageRequireLicenseAcceptance>
+    <GenerateDocumentationFile>true</GenerateDocumentationFile>
+    <!-- Missing XML comments on public members are documentation debt, not build errors. -->
+    <NoWarn>$(NoWarn);CS1591;CS1573</NoWarn>
+
+    <!-- Source Link: deterministic builds with sources resolvable from GitHub, and a .snupkg
+         of symbols so a stack trace through Laya lands on real code. -->
+    <PublishRepositoryUrl>true</PublishRepositoryUrl>
+    <EmbedUntrackedSources>true</EmbedUntrackedSources>
+    <IncludeSymbols>true</IncludeSymbols>
+    <SymbolPackageFormat>snupkg</SymbolPackageFormat>
+    <ContinuousIntegrationBuild Condition="'$(GITHUB_ACTIONS)' == 'true'">true</ContinuousIntegrationBuild>
+  </PropertyGroup>
+
 </Project>

@@ -1,0 +1,13 @@
+<Project>
+  <!-- Packaging bits that depend on IsPackable, which each project sets after
+       Directory.Build.props has been imported. Source Link itself needs no package
+       reference: the .NET SDK has shipped it in the box since .NET 8. -->
+
+  <!-- The licence, the notice, the icon and a package README travel inside every .nupkg. -->
+  <ItemGroup Condition="'$(IsPackable)' == 'true'">
+    <None Include="$(MSBuildThisFileDirectory)LICENSE" Pack="true" PackagePath="/" Visible="false" />
+    <None Include="$(MSBuildThisFileDirectory)NOTICE" Pack="true" PackagePath="/" Visible="false" />
+    <None Include="$(MSBuildThisFileDirectory)assets/logo-mark.png" Pack="true" PackagePath="icon.png" Visible="false" />
+    <None Include="README.md" Pack="true" PackagePath="/" Visible="false" Condition="Exists('$(MSBuildProjectDirectory)/README.md')" />
+  </ItemGroup>
+</Project>
