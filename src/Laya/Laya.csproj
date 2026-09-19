@@ -1,0 +1,14 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <!-- A single-value TargetFrameworks still makes the project cross-targeting, which
+         `dotnet run` then refuses; the single-target case sets the singular property instead. -->
+    <TargetFramework Condition="'$(LayaEnableNet11)' != 'true'">net10.0</TargetFramework>
+    <TargetFrameworks Condition="'$(LayaEnableNet11)' == 'true'">$(LayaTargetFrameworks)</TargetFrameworks>
+    <RootNamespace>Laya</RootNamespace>
+    <AssemblyName>Laya</AssemblyName>
+    <IsPackable>true</IsPackable>
+    <PackageId>Laya</PackageId>
+    <Description>Fast, non-autoregressive System 1 decision engine with calibrated probabilities.</Description>
+    <ServerGarbageCollection>true</ServerGarbageCollection>
+  </PropertyGroup>
+</Project>

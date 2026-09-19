@@ -1,0 +1,360 @@
+using System.Diagnostics;
+using System.Globalization;
+using System.Text.Json;
+using Laya;
+using Laya.Diagnostics;
+using Laya.Io;
+using Laya.Runtime;
+using Laya.Tokenizers;
+
+namespace Laya.Cli;
+
+internal static class Program
+{
+    private static readonly JsonSerializerOptions Json = new()
+    {
+        WriteIndented = true,
+        // Match the Python payload: a choice answer has no "score" key at all, rather than null.
+        DefaultIgnoreCondition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull,
+        Encoder = System.Text.Encodings.Web.JavaScriptEncoder.UnsafeRelaxedJsonEscaping,
+    };
+
+    public static int Main(string[] args)
+    {
+        if (args.Length == 0 || args[0] is "-h" or "--help" or "help")
+        {
+            PrintUsage();
+            return args.Length == 0 ? 1 : 0;
+        }
+
+        var options = CommandLine.Parse(args.AsSpan(1));
+        try
+        {
+            return args[0] switch
+            {
+                "download" => Download(options),
+                "predict" => Predict(options),
+                "route" => Route(options),
+                "presets" => ListPresets(),
+                "tokenize" => Tokenize(options),
+                "dump-states" => DumpStates(options),
+                "bench" => Bench(options),
+                _ => Unknown(args[0]),
+            };
+        }
+        catch (Exception exception) when (exception is ArgumentException or IOException
+            or InvalidDataException or KeyNotFoundException or HttpRequestException or NotSupportedException)
+        {
+            Console.Error.WriteLine("error: " + exception.Message);
+            return 1;
+        }
+    }
+
+    private static int Unknown(string command)
+    {
+        Console.Error.WriteLine($"error: unknown command '{command}'.");
+        PrintUsage();
+        return 1;
+    }
+
+    private static void PrintUsage() => Console.WriteLine("""
+        laya — System 1 decision engine (.NET port)
+
+        USAGE
+          laya <command> [options]
+
+        COMMANDS
+          download      Fetch a checkpoint from Hugging Face
+          predict       Answer a question set about some state
+          route         Show which checkpoint a state would route to (loads nothing)
+          presets       List the built-in question sets
+          tokenize      Tokenize text with a checkpoint's tokenizer
+          dump-states   Write per-layer activations for parity checking
+          bench         Time the forward pass
+
+        COMMON OPTIONS
+          --model <name>        english | multilingual | typed-decisions   (default: english)
+          --model-dir <path>    Use a checkpoint already on disk instead of downloading
+          --cache <path>        Download cache root (default: ~/.cache/laya or $LAYA_HOME)
+
+        EXAMPLES
+          laya download --model english --cache ./artifacts/models
+          laya predict --model-dir ./artifacts/models/english --preset triage \
+                       --text "I was charged twice and nobody answers"
+          laya route --text "Mein Konto wurde zweimal belastet"
+          laya dump-states --model-dir ./artifacts/models/english \
+                           --text "hello" --question noul:"Is this a greeting?" \
+                           --out artifacts/dumps/dotnet.json
+        """);
+
+    private static int Download(CommandLine options)
+    {
+        string name = Router.Normalise(options.Value("model") ?? "english");
+        var spec = Router.DefaultModels[name];
+        string? cache = options.Value("cache");
+
+        Console.WriteLine($"Downloading {spec} …");
+        using var downloader = new HuggingFaceDownloader(options.Value("token"));
+        var progress = new ConsoleProgress();
+        string root = downloader.SnapshotAsync(spec.Repo, cache,
+                include: HuggingFaceDownloader.CheckpointFilter(spec.Subfolder), progress: progress)
+            .GetAwaiter().GetResult();
+        progress.Finish();
+
+        string directory = spec.Subfolder is null ? root : Path.Combine(root, spec.Subfolder);
+        Console.WriteLine($"Ready: {directory}");
+        return 0;
+    }
+
+    private static int Predict(CommandLine options)
+    {
+        using var agent = OpenAgent(options);
+        object? state = ReadState(options);
+        var questions = ReadQuestions(options);
+
+        var stopwatch = Stopwatch.StartNew();
+        var result = agent.SystemOne(state, questions);
+        stopwatch.Stop();
+
+        Console.WriteLine(JsonSerializer.Serialize(ToPayload(result), Json));
+        Console.Error.WriteLine(string.Format(CultureInfo.InvariantCulture,
+            "{0} question(s), {1} input tokens, {2:F0} ms", questions.Count, result.Usage.InputTokens,
+            stopwatch.Elapsed.TotalMilliseconds));
+        return 0;
+    }
+
+    private static int Route(CommandLine options)
+    {
+        object? state = ReadState(options);
+        var questions = options.Has("preset") || options.Has("question") ? ReadQuestions(options) : null;
+        var router = new Router(autoTaskDetection: options.Has("auto-task"));
+        var decision = router.Route(state, questions, options.Value("force-model"), options.Value("task"),
+            options.Value("lang"));
+        Console.WriteLine(JsonSerializer.Serialize(decision, Json));
+        return 0;
+    }
+
+    private static int ListPresets()
+    {
+        foreach (string name in Presets.Names)
+        {
+            var preset = Presets.ByName(name);
+            Console.WriteLine($"{name} ({preset.Count} questions)");
+            foreach (var (id, question) in preset)
+            {
+                Console.WriteLine($"  {id,-18} {QuestionTypes.Name(question.Type),-6} {question.InstructionText()}");
+            }
+            Console.WriteLine();
+        }
+        return 0;
+    }
+
+    private static int Tokenize(CommandLine options)
+    {
+        string directory = ModelDirectory(options);
+        string tokenizerDirectory = Path.Combine(directory, "tokenizer");
+        var tokenizer = HuggingFaceTokenizer.FromDirectory(
+            Directory.Exists(tokenizerDirectory) ? tokenizerDirectory : directory);
+
+        // --jsonl treats each line as a JSON string, so a corpus can carry newlines and quotes.
+        bool jsonLines = options.Has("jsonl");
+        IEnumerable<string> inputs = options.Value("file") is string file
+            ? File.ReadLines(file).Select(line => jsonLines ? JsonSerializer.Deserialize<string>(line)! : line)
+            : [options.Value("text") ?? throw new ArgumentException("tokenize needs --text or --file.")];
+
+        foreach (string line in inputs)
+        {
+            var ids = tokenizer.Encode(line);
+            Console.WriteLine(JsonSerializer.Serialize(new
+            {
+                text = line,
+                ids,
+                tokens = options.Has("with-tokens") ? ids.Select(tokenizer.TokenOf).ToArray() : null,
+            }, Json.WriteIndented ? new JsonSerializerOptions(Json) { WriteIndented = false } : Json));
+        }
+        return 0;
+    }
+
+    private static int DumpStates(CommandLine options)
+    {
+        using var agent = OpenAgent(options);
+        object? state = ReadState(options);
+        var questions = ReadQuestions(options);
+
+        var recorder = new StateRecorder();
+        var result = agent.SystemOne(state, questions, recorder);
+
+        string output = options.Value("out") ?? "artifacts/dumps/dotnet.json";
+        string answersJson = JsonSerializer.Serialize(
+            result.Answers.ToDictionary(a => a.Key, a => ToAnswerPayload(a.Value)), Json);
+        recorder.Save(output, sampleSize: int.Parse(options.Value("sample") ?? "64", CultureInfo.InvariantCulture),
+            full: options.Has("full"), answersJson: answersJson);
+        Console.WriteLine(recorder.Describe());
+        Console.WriteLine();
+        Console.WriteLine($"wrote {recorder.States.Count} tensors to {output}");
+        Console.WriteLine(JsonSerializer.Serialize(ToPayload(result), Json));
+        return 0;
+    }
+
+    private static int Bench(CommandLine options)
+    {
+        using var agent = OpenAgent(options);
+        object? state = ReadState(options);
+        var questions = ReadQuestions(options);
+        int iterations = int.Parse(options.Value("iterations") ?? "3", CultureInfo.InvariantCulture);
+
+        agent.SystemOne(state, questions);   // warm up the JIT and the page cache
+        var timings = new List<double>();
+        for (int i = 0; i < iterations; ++i)
+        {
+            var stopwatch = Stopwatch.StartNew();
+            var result = agent.SystemOne(state, questions);
+            stopwatch.Stop();
+            timings.Add(stopwatch.Elapsed.TotalMilliseconds);
+            Console.WriteLine(string.Format(CultureInfo.InvariantCulture,
+                "run {0}: {1:F1} ms for {2} questions / {3} tokens",
+                i + 1, timings[^1], questions.Count, result.Usage.InputTokens));
+        }
+        timings.Sort();
+        Console.WriteLine(string.Format(CultureInfo.InvariantCulture,
+            "median {0:F1} ms  ({1})", timings[timings.Count / 2], Numerics.SimdOps.Capabilities));
+        return 0;
+    }
+
+    private static Agent OpenAgent(CommandLine options)
+    {
+        if (options.Value("model-dir") is string directory) return Agent.FromDirectory(directory);
+
+        string name = Router.Normalise(options.Value("model") ?? "english");
+        var spec = Router.DefaultModels[name];
+        var progress = new ConsoleProgress();
+        var agent = Agent.Load(spec.Repo, spec.Subfolder, options.Value("token"), options.Value("cache"), progress);
+        progress.Finish();
+        return agent;
+    }
+
+    private static string ModelDirectory(CommandLine options)
+    {
+        if (options.Value("model-dir") is string directory) return directory;
+
+        string name = Router.Normalise(options.Value("model") ?? "english");
+        var spec = Router.DefaultModels[name];
+        using var downloader = new HuggingFaceDownloader(options.Value("token"));
+        var progress = new ConsoleProgress();
+        string root = downloader.SnapshotAsync(spec.Repo, options.Value("cache"),
+            include: HuggingFaceDownloader.CheckpointFilter(spec.Subfolder), progress: progress)
+            .GetAwaiter().GetResult();
+        progress.Finish();
+        return spec.Subfolder is null ? root : Path.Combine(root, spec.Subfolder);
+    }
+
+    private static object? ReadState(CommandLine options)
+    {
+        if (options.Value("state-file") is string path)
+        {
+            string content = File.ReadAllText(path);
+            return path.EndsWith(".json", StringComparison.OrdinalIgnoreCase)
+                ? JsonDocument.Parse(content).RootElement.Clone()
+                : content;
+        }
+        if (options.Value("state-json") is string json) return JsonDocument.Parse(json).RootElement.Clone();
+        return options.Value("text") ?? throw new ArgumentException("provide --text, --state-json or --state-file.");
+    }
+
+    /// <summary>
+    /// Questions come from a preset, a JSON file, or repeated <c>--question</c> flags in the
+    /// compact <c>id=type:instructions[|option,option]</c> form.
+    /// </summary>
+    private static QuestionSet ReadQuestions(CommandLine options)
+    {
+        if (options.Value("preset") is string preset) return Presets.ByName(preset);
+        if (options.Value("questions-file") is string file) return QuestionJson.Parse(File.ReadAllText(file));
+
+        var inline = options.Values("question");
+        if (inline.Count == 0)
+        {
+            throw new ArgumentException("provide --preset, --questions-file or one or more --question flags.");
+        }
+
+        var questions = new QuestionSet();
+        int index = 0;
+        foreach (string spec in inline)
+        {
+            var (id, question) = QuestionJson.ParseInline(spec, index++);
+            questions.Add(id, question);
+        }
+        return questions;
+    }
+
+    private static object ToAnswerPayload(Answer answer) => new
+    {
+        type = answer.Type,
+        choice = answer.Choice,
+        score = answer.Score,
+        noul = answer.Noul,
+        probabilities = answer.Probabilities?.ToDictionary(p => p.Key, p => p.Value),
+        legend = answer.Legend?.ToDictionary(l => l.Key, l => l.Value),
+        confidence = answer.Confidence,
+        action = new { act_probability = answer.Action.ActProbability },
+    };
+
+    private static object ToPayload(DecisionResult result) => new
+    {
+        model = result.Model,
+        answers = result.Answers.ToDictionary(a => a.Key, a => ToAnswerPayload(a.Value)),
+        usage = new { input_tokens = result.Usage.InputTokens, output_tokens = result.Usage.OutputTokens },
+        routing = result.Routing,
+    };
+
+    /// <summary>
+    /// A progress line that redraws in place on a terminal. When stderr is redirected there is no
+    /// carriage return to redraw with, so it falls back to one line per 10% — otherwise a log file
+    /// collects a line per megabyte.
+    /// </summary>
+    private sealed class ConsoleProgress : IProgress<DownloadProgress>
+    {
+        private static readonly bool Interactive = !Console.IsErrorRedirected;
+
+        private string _current = string.Empty;
+        private int _lastPercent = -1;
+        private bool _wrote;
+
+        public void Report(DownloadProgress value)
+        {
+            if (value.File != _current)
+            {
+                Finish();
+                _current = value.File;
+                _lastPercent = -1;
+            }
+
+            int percent = value.TotalBytes > 0 ? (int)(100 * value.BytesRead / value.TotalBytes) : 0;
+            int step = Interactive ? 1 : 10;
+            bool complete = value.TotalBytes > 0 && value.BytesRead >= value.TotalBytes;
+            if (!complete && percent / step == _lastPercent / step) return;
+            _lastPercent = percent;
+
+            string line = string.Format(CultureInfo.InvariantCulture,
+                "  {0,-44} {1,6:F1} / {2,6:F1} MiB  {3,3}%", Shorten(value.File),
+                value.BytesRead / 1048576.0, value.TotalBytes / 1048576.0, percent);
+
+            if (Interactive)
+            {
+                Console.Error.Write('\r' + line);
+                _wrote = true;
+            }
+            else
+            {
+                Console.Error.WriteLine(line);
+            }
+        }
+
+        public void Finish()
+        {
+            if (_wrote) Console.Error.WriteLine();
+            _wrote = false;
+        }
+
+        private static string Shorten(string path) => path.Length <= 44 ? path : "…" + path[^43..];
+    }
+}

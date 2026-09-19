@@ -1,0 +1,16 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <!-- A single-value TargetFrameworks still makes the project cross-targeting, which
+         `dotnet run` then refuses; the single-target case sets the singular property instead. -->
+    <TargetFramework Condition="'$(LayaEnableNet11)' != 'true'">net10.0</TargetFramework>
+    <TargetFrameworks Condition="'$(LayaEnableNet11)' == 'true'">$(LayaTargetFrameworks)</TargetFrameworks>
+    <RootNamespace>Laya.Cli</RootNamespace>
+    <AssemblyName>Laya.Cli</AssemblyName>
+    <PackAsTool>false</PackAsTool>
+    <ServerGarbageCollection>true</ServerGarbageCollection>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="../Laya/Laya.csproj" />
+  </ItemGroup>
+</Project>

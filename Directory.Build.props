@@ -1,0 +1,32 @@
+<Project>
+  <!-- The port targets .NET 10 and .NET 11: .NET 11 ships a handful of extra
+       Vector/TensorPrimitives methods we use behind #if NET11_0_OR_GREATER. The repository
+       must still build on a .NET 10 SDK, so the net11.0 target is only added when an 11.x
+       SDK is actually installed. Force it either way with -p:LayaEnableNet11=true|false. -->
+  <PropertyGroup>
+    <LayaDotnetRoot Condition="'$(LayaDotnetRoot)' == ''">$(MSBuildExtensionsPath)</LayaDotnetRoot>
+    <!-- MSBuildExtensionsPath is the running SDK's own folder, e.g. /usr/lib/dotnet/sdk/10.0.112,
+         so its parent is where every installed SDK version lives. -->
+    <LayaSdkDir>$([System.IO.Path]::GetFullPath('$(LayaDotnetRoot)/..'))</LayaSdkDir>
+    <LayaEnableNet11 Condition="'$(LayaEnableNet11)' == '' And $([System.IO.Directory]::Exists('$(LayaSdkDir)')) And $([System.IO.Directory]::GetDirectories('$(LayaSdkDir)', '11.*').Length) &gt; 0">true</LayaEnableNet11>
+    <LayaEnableNet11 Condition="'$(LayaEnableNet11)' == ''">false</LayaEnableNet11>
+
+    <LayaTargetFrameworks>net10.0</LayaTargetFrameworks>
+    <LayaTargetFrameworks Condition="'$(LayaEnableNet11)' == 'true'">net10.0;net11.0</LayaTargetFrameworks>
+
+    <LangVersion>latest</LangVersion>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <InvariantGlobalization>true</InvariantGlobalization>
+    <EnableNETAnalyzers>true</EnableNETAnalyzers>
+    <AnalysisLevel>latest</AnalysisLevel>
+
+    <Version>0.3.3</Version>
+    <Authors>Convai Innovations</Authors>
+    <PackageLicenseExpression>Apache-2.0</PackageLicenseExpression>
+    <RepositoryUrl>https://github.com/theolivenbaum/laya</RepositoryUrl>
+    <RepositoryType>git</RepositoryType>
+    <IsPackable>false</IsPackable>
+  </PropertyGroup>
+</Project>
