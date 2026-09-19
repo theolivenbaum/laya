@@ -1,6 +1,7 @@
 using System.Numerics;
 using System.Runtime.CompilerServices;
 using System.Runtime.Intrinsics;
+using Laya;
 
 namespace Laya.Numerics;
 
@@ -54,7 +55,7 @@ public sealed class PackedMatrix
         _panelWidth = 2 * SimdOps.PreferredLaneCount;
         _panels = (outFeatures + _panelWidth - 1) / _panelWidth;
         _panelStride = inFeatures * _panelWidth;
-        // The last panel is zero-padded so the kernel can always store two whole vectors.
+        // The last panel is zero-padded so the kernel can always load two whole vectors.
         _data = new float[(long)_panels * _panelStride];
 
         for (int panel = 0; panel < _panels; ++panel)
@@ -86,15 +87,13 @@ public sealed class PackedMatrix
         if (output.Length < (long)rows * OutFeatures) throw new ArgumentException("output is too small", nameof(output));
         if (!bias.IsEmpty && bias.Length < OutFeatures) throw new ArgumentException("bias is too small", nameof(bias));
 
-        // The kernel runs on raw pointers: the inner loop is four broadcasts and two vector loads
-        // per reduction step, and a bounds check on any of them costs more than the arithmetic.
         fixed (float* weights = _data, inputPointer = input, biasPointer = bias, outputPointer = output)
         {
             float* bias0 = bias.IsEmpty ? null : biasPointer;
 
             // Panels are independent and each owns at least two whole vectors of the output, so
             // neighbouring workers share at most the cache line at a panel boundary.
-            int workers = Environment.ProcessorCount;
+            int workers = LayaRuntime.MaxDegreeOfParallelism;
             if (workers <= 1 || (long)rows * OutFeatures * InFeatures <= 1_000_000)
             {
                 for (int panel = 0; panel < _panels; ++panel)
@@ -111,7 +110,7 @@ public sealed class PackedMatrix
 
             int chunk = Math.Max(1, _panels / (workers * 4));
             int chunks = (_panels + chunk - 1) / chunk;
-            Parallel.For(0, chunks, new ParallelOptions { MaxDegreeOfParallelism = workers }, index =>
+            Parallel.For(0, chunks, LayaRuntime.ParallelOptions, index =>
             {
                 int first = index * chunk;
                 int last = Math.Min(_panels, first + chunk);
@@ -124,184 +123,250 @@ public sealed class PackedMatrix
         }
     }
 
-    [MethodImpl(MethodImplOptions.AggressiveOptimization)]
     private unsafe void Panel(float* weights, float* input, int rows, float* bias, float* output, int panel)
     {
-        if (SimdOps.UseVector512)
+        int n0 = panel * _panelWidth;
+        int columns = Math.Min(_panelWidth, OutFeatures - n0);
+
+        // The ragged last panel is rare and small; keeping it out of the hot kernels means they
+        // never carry a partial-store branch.
+        if (columns != _panelWidth)
         {
-            Panel512(weights, input, rows, bias, output, panel);
+            PanelRagged(weights, input, rows, bias, output, panel, columns);
             return;
         }
 
-        int width = Vector<float>.Count;
-        int n0 = panel * _panelWidth;
-        int columns = Math.Min(_panelWidth, OutFeatures - n0);
-        float* panelBase = weights + (long)panel * _panelStride;
-        int features = InFeatures;
-
-        int row = 0;
-        for (; row + RowBlock <= rows; row += RowBlock)
-        {
-            Vector<float> c00 = default, c01 = default, c10 = default, c11 = default;
-            Vector<float> c20 = default, c21 = default, c30 = default, c31 = default;
-
-            float* a0 = input + (long)row * features;
-            float* a1 = a0 + features;
-            float* a2 = a1 + features;
-            float* a3 = a2 + features;
-            float* w = panelBase;
-
-            for (int i = 0; i < features; ++i, w += _panelWidth)
-            {
-                var b0 = Vector.Load(w);
-                var b1 = Vector.Load(w + width);
-
-                var a = new Vector<float>(a0[i]);
-                c00 = Vector.FusedMultiplyAdd(a, b0, c00);
-                c01 = Vector.FusedMultiplyAdd(a, b1, c01);
-                a = new Vector<float>(a1[i]);
-                c10 = Vector.FusedMultiplyAdd(a, b0, c10);
-                c11 = Vector.FusedMultiplyAdd(a, b1, c11);
-                a = new Vector<float>(a2[i]);
-                c20 = Vector.FusedMultiplyAdd(a, b0, c20);
-                c21 = Vector.FusedMultiplyAdd(a, b1, c21);
-                a = new Vector<float>(a3[i]);
-                c30 = Vector.FusedMultiplyAdd(a, b0, c30);
-                c31 = Vector.FusedMultiplyAdd(a, b1, c31);
-            }
-
-            Store(output, bias, row, n0, columns, c00, c01);
-            Store(output, bias, row + 1, n0, columns, c10, c11);
-            Store(output, bias, row + 2, n0, columns, c20, c21);
-            Store(output, bias, row + 3, n0, columns, c30, c31);
-        }
-
-        // Ragged tail: one row at a time, same kernel shape with a single accumulator pair.
-        for (; row < rows; ++row)
-        {
-            Vector<float> c0 = default, c1 = default;
-            float* a0 = input + (long)row * features;
-            float* w = panelBase;
-            for (int i = 0; i < features; ++i, w += _panelWidth)
-            {
-                var a = new Vector<float>(a0[i]);
-                c0 = Vector.FusedMultiplyAdd(a, Vector.Load(w), c0);
-                c1 = Vector.FusedMultiplyAdd(a, Vector.Load(w + width), c1);
-            }
-            Store(output, bias, row, n0, columns, c0, c1);
-        }
+        if (SimdOps.UseVector512) Panel512(weights, input, rows, bias, output, panel);
+        else PanelPortable(weights, input, rows, bias, output, panel);
     }
 
     /// <summary>
-    /// The same kernel over explicit 512-bit vectors: 32 outputs and four token rows per pass.
+    /// The 512-bit kernel: 32 outputs and six token rows per pass.
     ///
-    /// <para>Four rows, not eight: AVX-512 has the registers for sixteen accumulators, but holding
-    /// eight row pointers alongside them measured about 10% slower here, so the weight panel is
-    /// re-read more often and the register file stays comfortable.</para>
+    /// <para>The accumulators are seeded with the bias and stored straight to the destination.
+    /// That is not a micro-optimization: an earlier version passed them by value to a small
+    /// <c>Store</c> helper, the JIT declined to inline it, and the accumulators became address
+    /// exposed — so every single FMA in the inner loop was followed by a 64-byte spill to the
+    /// stack and a reload on the next iteration. It ran at a third of the speed. Anything that
+    /// takes the address of an accumulator, directly or through a call, has to stay out of this
+    /// loop.</para>
     /// </summary>
     [MethodImpl(MethodImplOptions.AggressiveOptimization)]
     private unsafe void Panel512(float* weights, float* input, int rows, float* bias, float* output, int panel)
     {
         const int width = 16;
-        int n0 = panel * _panelWidth;
-        int columns = Math.Min(_panelWidth, OutFeatures - n0);
-        float* panelBase = weights + (long)panel * _panelStride;
+        // The panel width is a compile-time constant on this path: _panelWidth is 2 * 16 whenever
+        // the 512-bit kernel is selected, and letting the JIT know that turns the pointer bump at
+        // the end of the inner loop from three instructions into a folded immediate.
+        const int panelWidth = 2 * width;
+        System.Diagnostics.Debug.Assert(panelWidth == _panelWidth, "panel width must match the kernel");
+        // Six rows, measured: 4 rows gives 71 GFLOP/s on the 404x1024x5248 projection, 6 gives 87,
+        // 8 gives 83 and 12 gives 80. Twelve accumulators plus the two weight vectors and one
+        // broadcast fit the low sixteen zmm registers; wider blocks spill into zmm16-31 and lose
+        // more than the extra reuse gains.
+        const int rowBlock = 6;
+        int outFeatures = OutFeatures;
         int features = InFeatures;
+        int n0 = panel * panelWidth;
+        float* panelBase = weights + (long)panel * _panelStride;
+
+        var seed0 = bias is null ? Vector512<float>.Zero : Vector512.Load(bias + n0);
+        var seed1 = bias is null ? Vector512<float>.Zero : Vector512.Load(bias + n0 + width);
 
         int row = 0;
-        for (; row + RowBlock <= rows; row += RowBlock)
+        for (; row + rowBlock <= rows; row += rowBlock)
         {
-            Vector512<float> c00 = default, c01 = default, c10 = default, c11 = default;
-            Vector512<float> c20 = default, c21 = default, c30 = default, c31 = default;
+            var c00 = seed0; var c01 = seed1;
+            var c10 = seed0; var c11 = seed1;
+            var c20 = seed0; var c21 = seed1;
+            var c30 = seed0; var c31 = seed1;
+            var c40 = seed0; var c41 = seed1;
+            var c50 = seed0; var c51 = seed1;
 
-            float* a0 = input + (long)row * features;
-            float* a1 = a0 + features;
-            float* a2 = a1 + features;
-            float* a3 = a2 + features;
+            float* a0 = input + (long)(row + 0) * features;
+            float* a1 = input + (long)(row + 1) * features;
+            float* a2 = input + (long)(row + 2) * features;
+            float* a3 = input + (long)(row + 3) * features;
+            float* a4 = input + (long)(row + 4) * features;
+            float* a5 = input + (long)(row + 5) * features;
             float* w = panelBase;
 
-            for (int i = 0; i < features; ++i, w += _panelWidth)
+            for (int i = 0; i < features; ++i, w += panelWidth)
             {
                 var b0 = Vector512.Load(w);
                 var b1 = Vector512.Load(w + width);
-
-                var a = Vector512.Create(a0[i]);
-                c00 = Vector512.FusedMultiplyAdd(a, b0, c00);
-                c01 = Vector512.FusedMultiplyAdd(a, b1, c01);
-                a = Vector512.Create(a1[i]);
-                c10 = Vector512.FusedMultiplyAdd(a, b0, c10);
-                c11 = Vector512.FusedMultiplyAdd(a, b1, c11);
-                a = Vector512.Create(a2[i]);
-                c20 = Vector512.FusedMultiplyAdd(a, b0, c20);
-                c21 = Vector512.FusedMultiplyAdd(a, b1, c21);
-                a = Vector512.Create(a3[i]);
-                c30 = Vector512.FusedMultiplyAdd(a, b0, c30);
-                c31 = Vector512.FusedMultiplyAdd(a, b1, c31);
+                var v0 = Vector512.Create(a0[i]);
+                c00 = Vector512.FusedMultiplyAdd(v0, b0, c00);
+                c01 = Vector512.FusedMultiplyAdd(v0, b1, c01);
+                var v1 = Vector512.Create(a1[i]);
+                c10 = Vector512.FusedMultiplyAdd(v1, b0, c10);
+                c11 = Vector512.FusedMultiplyAdd(v1, b1, c11);
+                var v2 = Vector512.Create(a2[i]);
+                c20 = Vector512.FusedMultiplyAdd(v2, b0, c20);
+                c21 = Vector512.FusedMultiplyAdd(v2, b1, c21);
+                var v3 = Vector512.Create(a3[i]);
+                c30 = Vector512.FusedMultiplyAdd(v3, b0, c30);
+                c31 = Vector512.FusedMultiplyAdd(v3, b1, c31);
+                var v4 = Vector512.Create(a4[i]);
+                c40 = Vector512.FusedMultiplyAdd(v4, b0, c40);
+                c41 = Vector512.FusedMultiplyAdd(v4, b1, c41);
+                var v5 = Vector512.Create(a5[i]);
+                c50 = Vector512.FusedMultiplyAdd(v5, b0, c50);
+                c51 = Vector512.FusedMultiplyAdd(v5, b1, c51);
             }
 
-            Store512(output, bias, row, n0, columns, c00, c01);
-            Store512(output, bias, row + 1, n0, columns, c10, c11);
-            Store512(output, bias, row + 2, n0, columns, c20, c21);
-            Store512(output, bias, row + 3, n0, columns, c30, c31);
+            float* d = output + (long)row * outFeatures + n0;
+            c00.Store(d); c01.Store(d + width);
+            d += outFeatures;
+            c10.Store(d); c11.Store(d + width);
+            d += outFeatures;
+            c20.Store(d); c21.Store(d + width);
+            d += outFeatures;
+            c30.Store(d); c31.Store(d + width);
+            d += outFeatures;
+            c40.Store(d); c41.Store(d + width);
+            d += outFeatures;
+            c50.Store(d); c51.Store(d + width);
         }
 
-        // Ragged tail: one row at a time, same kernel shape with a single accumulator pair.
         for (; row < rows; ++row)
         {
-            Vector512<float> c0 = default, c1 = default;
+            var c0 = seed0;
+            var c1 = seed1;
             float* a0 = input + (long)row * features;
             float* w = panelBase;
-            for (int i = 0; i < features; ++i, w += _panelWidth)
+            for (int i = 0; i < features; ++i, w += panelWidth)
             {
-                var broadcast = Vector512.Create(a0[i]);
-                c0 = Vector512.FusedMultiplyAdd(broadcast, Vector512.Load(w), c0);
-                c1 = Vector512.FusedMultiplyAdd(broadcast, Vector512.Load(w + width), c1);
+                var a = Vector512.Create(a0[i]);
+                c0 = Vector512.FusedMultiplyAdd(a, Vector512.Load(w), c0);
+                c1 = Vector512.FusedMultiplyAdd(a, Vector512.Load(w + width), c1);
             }
-            Store512(output, bias, row, n0, columns, c0, c1);
+            float* d = output + (long)row * outFeatures + n0;
+            c0.Store(d);
+            c1.Store(d + width);
         }
     }
 
-    [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private unsafe void Store512(float* output, float* bias, int row, int n0, int columns,
-        Vector512<float> low, Vector512<float> high)
-    {
-        const int width = 16;
-        float* destination = output + (long)row * OutFeatures + n0;
-        if (columns == 2 * width && bias is null)
-        {
-            low.Store(destination);
-            high.Store(destination + width);
-            return;
-        }
-
-        Span<float> tile = stackalloc float[2 * width];
-        low.StoreUnsafe(ref tile[0]);
-        high.StoreUnsafe(ref tile[width]);
-        for (int i = 0; i < columns; ++i) destination[i] = bias is null ? tile[i] : tile[i] + bias[n0 + i];
-    }
-
-    [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private unsafe void Store(float* output, float* bias, int row, int n0, int columns,
-        Vector<float> low, Vector<float> high)
+    /// <summary>The same kernel over the portable vector width, for machines without AVX-512.</summary>
+    [MethodImpl(MethodImplOptions.AggressiveOptimization)]
+    private unsafe void PanelPortable(float* weights, float* input, int rows, float* bias, float* output, int panel)
     {
         int width = Vector<float>.Count;
-        float* destination = output + (long)row * OutFeatures + n0;
+        const int rowBlock = 6;
+        int panelWidth = _panelWidth;
+        int outFeatures = OutFeatures;
+        int features = InFeatures;
+        int n0 = panel * panelWidth;
+        float* panelBase = weights + (long)panel * _panelStride;
 
-        if (columns == 2 * width && bias is null)
+        var seed0 = bias is null ? Vector<float>.Zero : Vector.Load(bias + n0);
+        var seed1 = bias is null ? Vector<float>.Zero : Vector.Load(bias + n0 + width);
+
+        int row = 0;
+        for (; row + rowBlock <= rows; row += rowBlock)
         {
-            low.Store(destination);
-            high.Store(destination + width);
-            return;
+            var c00 = seed0; var c01 = seed1;
+            var c10 = seed0; var c11 = seed1;
+            var c20 = seed0; var c21 = seed1;
+            var c30 = seed0; var c31 = seed1;
+            var c40 = seed0; var c41 = seed1;
+            var c50 = seed0; var c51 = seed1;
+
+            float* a0 = input + (long)(row + 0) * features;
+            float* a1 = input + (long)(row + 1) * features;
+            float* a2 = input + (long)(row + 2) * features;
+            float* a3 = input + (long)(row + 3) * features;
+            float* a4 = input + (long)(row + 4) * features;
+            float* a5 = input + (long)(row + 5) * features;
+            float* w = panelBase;
+
+            for (int i = 0; i < features; ++i, w += panelWidth)
+            {
+                var b0 = Vector.Load(w);
+                var b1 = Vector.Load(w + width);
+                var v0 = new Vector<float>(a0[i]);
+                c00 = Vector.FusedMultiplyAdd(v0, b0, c00);
+                c01 = Vector.FusedMultiplyAdd(v0, b1, c01);
+                var v1 = new Vector<float>(a1[i]);
+                c10 = Vector.FusedMultiplyAdd(v1, b0, c10);
+                c11 = Vector.FusedMultiplyAdd(v1, b1, c11);
+                var v2 = new Vector<float>(a2[i]);
+                c20 = Vector.FusedMultiplyAdd(v2, b0, c20);
+                c21 = Vector.FusedMultiplyAdd(v2, b1, c21);
+                var v3 = new Vector<float>(a3[i]);
+                c30 = Vector.FusedMultiplyAdd(v3, b0, c30);
+                c31 = Vector.FusedMultiplyAdd(v3, b1, c31);
+                var v4 = new Vector<float>(a4[i]);
+                c40 = Vector.FusedMultiplyAdd(v4, b0, c40);
+                c41 = Vector.FusedMultiplyAdd(v4, b1, c41);
+                var v5 = new Vector<float>(a5[i]);
+                c50 = Vector.FusedMultiplyAdd(v5, b0, c50);
+                c51 = Vector.FusedMultiplyAdd(v5, b1, c51);
+            }
+
+            float* d = output + (long)row * outFeatures + n0;
+            c00.Store(d); c01.Store(d + width);
+            d += outFeatures;
+            c10.Store(d); c11.Store(d + width);
+            d += outFeatures;
+            c20.Store(d); c21.Store(d + width);
+            d += outFeatures;
+            c30.Store(d); c31.Store(d + width);
+            d += outFeatures;
+            c40.Store(d); c41.Store(d + width);
+            d += outFeatures;
+            c50.Store(d); c51.Store(d + width);
         }
 
-        Span<float> tile = stackalloc float[2 * Vector<float>.Count];
-        low.StoreUnsafe(ref tile[0]);
-        high.StoreUnsafe(ref tile[width]);
-        if (bias is null)
+        for (; row < rows; ++row)
         {
-            for (int i = 0; i < columns; ++i) destination[i] = tile[i];
-            return;
+            var c0 = seed0;
+            var c1 = seed1;
+            float* a0 = input + (long)row * features;
+            float* w = panelBase;
+            for (int i = 0; i < features; ++i, w += panelWidth)
+            {
+                var a = new Vector<float>(a0[i]);
+                c0 = Vector.FusedMultiplyAdd(a, Vector.Load(w), c0);
+                c1 = Vector.FusedMultiplyAdd(a, Vector.Load(w + width), c1);
+            }
+            float* d = output + (long)row * outFeatures + n0;
+            c0.Store(d);
+            c1.Store(d + width);
         }
-        for (int i = 0; i < columns; ++i) destination[i] = tile[i] + bias[n0 + i];
+    }
+
+    /// <summary>
+    /// The last panel when the output dimension is not a whole number of panels. Computed the same
+    /// way, into a full-width buffer, then trimmed — correctness over speed, since this is at most
+    /// one panel out of dozens.
+    /// </summary>
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private unsafe void PanelRagged(float* weights, float* input, int rows, float* bias, float* output,
+        int panel, int columns)
+    {
+        int panelWidth = _panelWidth;
+        int features = InFeatures;
+        int n0 = panel * panelWidth;
+        float* panelBase = weights + (long)panel * _panelStride;
+        Span<float> tile = stackalloc float[panelWidth];
+
+        for (int row = 0; row < rows; ++row)
+        {
+            tile.Clear();
+            float* a0 = input + (long)row * features;
+            float* w = panelBase;
+            for (int i = 0; i < features; ++i, w += panelWidth)
+            {
+                float a = a0[i];
+                for (int j = 0; j < panelWidth; ++j) tile[j] += a * w[j];
+            }
+
+            float* destination = output + (long)row * OutFeatures + n0;
+            for (int j = 0; j < columns; ++j)
+            {
+                destination[j] = bias is null ? tile[j] : tile[j] + bias[n0 + j];
+            }
+        }
     }
 }

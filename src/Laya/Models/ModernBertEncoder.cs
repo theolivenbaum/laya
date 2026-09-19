@@ -1,3 +1,4 @@
+using System.Buffers;
 using Laya.Diagnostics;
 using Laya.Io;
 using Laya.Numerics;
@@ -54,6 +55,9 @@ public sealed class ModernBertEncoder
 
     public ModernBertConfig Config => _config;
 
+    /// <summary>Bytes the embeddings and repacked projections occupy in managed memory.</summary>
+    public long WeightBytes { get; private set; }
+
     public ModernBertEncoder(ModernBertConfig config, SafetensorsFile weights, string prefix = "encoder.")
     {
         _config = config;
@@ -90,6 +94,10 @@ public sealed class ModernBertEncoder
 
         _globalRope = new RopeCache(config.HeadDim, config.GlobalRopeTheta);
         _localRope = new RopeCache(config.HeadDim, config.LocalRopeTheta);
+
+        WeightBytes = (long)sizeof(float) * (_tokenEmbeddings.Length + _embeddingNormWeight.Length
+                + _embeddingNormBias.Length + _finalNormWeight.Length + _finalNormBias.Length)
+            + _layers.Sum(l => l.Wqkv.Bytes + l.AttnWo.Bytes + l.MlpWi.Bytes + l.MlpWo.Bytes);
     }
 
     private static float[] Optional(SafetensorsFile weights, string name)
@@ -114,6 +122,8 @@ public sealed class ModernBertEncoder
         int intermediate = _config.IntermediateSize;
 
         var hiddenStates = new float[tokens * hidden];
+        using (ForwardTiming.Measure("embeddings"))
+        {
         for (int t = 0; t < tokens; ++t)
         {
             int id = tokenIds[t];
@@ -123,40 +133,46 @@ public sealed class ModernBertEncoder
             }
             _tokenEmbeddings.AsSpan(id * hidden, hidden).CopyTo(hiddenStates.AsSpan(t * hidden, hidden));
         }
-        NormalizeInto(hiddenStates, hiddenStates, tokens, hidden, _embeddingNormWeight, _embeddingNormBias);
+            NormalizeInto(hiddenStates, hiddenStates, tokens, hidden, _embeddingNormWeight, _embeddingNormBias);
+        }
         recorder?.Record("encoder.embeddings", hiddenStates, segments, hidden);
 
-        var normed = new float[tokens * hidden];
-        var qkv = new float[tokens * 3 * hidden];
-        var attention = new float[tokens * hidden];
-        var projected = new float[tokens * hidden];
-        var mlpHidden = new float[tokens * 2 * intermediate];
-        var activated = new float[tokens * intermediate];
+        var units = AttentionUnits(segments);
+        using var scratch = new ScratchBuffers();
+        var normed = scratch.Rent(tokens * hidden);
+        var qkv = scratch.Rent(tokens * 3 * hidden);
+        var attention = scratch.Rent(tokens * hidden);
+        var projected = scratch.Rent(tokens * hidden);
+        var mlpHidden = scratch.Rent(tokens * 2 * intermediate);
+        var activated = scratch.Rent(tokens * intermediate);
 
         for (int layerIndex = 0; layerIndex < _layers.Length; ++layerIndex)
         {
             var layer = _layers[layerIndex];
 
-            if (layer.AttnNormWeight is null)
+            using (ForwardTiming.Measure("encoder.norm"))
             {
-                hiddenStates.AsSpan(0, tokens * hidden).CopyTo(normed);
-            }
-            else
-            {
-                NormalizeInto(hiddenStates, normed, tokens, hidden, layer.AttnNormWeight, layer.AttnNormBias ?? []);
+                if (layer.AttnNormWeight is null)
+                {
+                    hiddenStates.AsSpan(0, tokens * hidden).CopyTo(normed.AsSpan(0, tokens * hidden));
+                }
+                else
+                {
+                    NormalizeInto(hiddenStates, normed, tokens, hidden, layer.AttnNormWeight, layer.AttnNormBias ?? []);
+                }
             }
 
-            layer.Wqkv.Multiply(normed.AsSpan(0, tokens * hidden), tokens, layer.WqkvBias, qkv);
-            Attention(qkv, segments, layer.Kind, attention);
-            layer.AttnWo.Multiply(attention.AsSpan(0, tokens * hidden), tokens, layer.AttnWoBias, projected);
-            SimdOps.Add(hiddenStates, projected.AsSpan(0, tokens * hidden));
+            using (ForwardTiming.Measure("encoder.qkv")) layer.Wqkv.Multiply(normed.AsSpan(0, tokens * hidden), tokens, layer.WqkvBias, qkv);
+            using (ForwardTiming.Measure("encoder.attention")) Attention(qkv, segments, layer.Kind, attention, units);
+            using (ForwardTiming.Measure("encoder.attn_out")) layer.AttnWo.Multiply(attention.AsSpan(0, tokens * hidden), tokens, layer.AttnWoBias, projected);
+            using (ForwardTiming.Measure("encoder.residual")) SimdOps.Add(hiddenStates.AsSpan(0, tokens * hidden), projected.AsSpan(0, tokens * hidden));
             recorder?.Record($"encoder.layers.{layerIndex}.attn_residual", hiddenStates, segments, hidden);
 
-            NormalizeInto(hiddenStates, normed, tokens, hidden, layer.MlpNormWeight, layer.MlpNormBias);
-            layer.MlpWi.Multiply(normed.AsSpan(0, tokens * hidden), tokens, layer.MlpWiBias, mlpHidden);
-            GeGlu(mlpHidden, tokens, intermediate, activated);
-            layer.MlpWo.Multiply(activated.AsSpan(0, tokens * intermediate), tokens, layer.MlpWoBias, projected);
-            SimdOps.Add(hiddenStates, projected.AsSpan(0, tokens * hidden));
+            using (ForwardTiming.Measure("encoder.norm")) NormalizeInto(hiddenStates, normed, tokens, hidden, layer.MlpNormWeight, layer.MlpNormBias);
+            using (ForwardTiming.Measure("encoder.mlp_in")) layer.MlpWi.Multiply(normed.AsSpan(0, tokens * hidden), tokens, layer.MlpWiBias, mlpHidden);
+            using (ForwardTiming.Measure("encoder.geglu")) GeGlu(mlpHidden, tokens, intermediate, activated);
+            using (ForwardTiming.Measure("encoder.mlp_out")) layer.MlpWo.Multiply(activated.AsSpan(0, tokens * intermediate), tokens, layer.MlpWoBias, projected);
+            using (ForwardTiming.Measure("encoder.residual")) SimdOps.Add(hiddenStates.AsSpan(0, tokens * hidden), projected.AsSpan(0, tokens * hidden));
             recorder?.Record($"encoder.layers.{layerIndex}.output", hiddenStates, segments, hidden);
         }
 
@@ -191,24 +207,30 @@ public sealed class ModernBertEncoder
         }
     }
 
-    private void Attention(float[] qkv, IReadOnlyList<Segment> segments, AttentionKind kind, float[] destination)
+    /// <summary>
+    /// Multi-head attention over each segment independently.
+    ///
+    /// <para>Scratch space comes from the array pool rather than <c>new</c>: this runs 28 times per
+    /// call for every (segment, head) pair, and allocating the rotated query and key per unit was
+    /// costing well over a hundred megabytes of garbage per forward pass.</para>
+    ///
+    /// <para>The inner loops work on pointers. A head is 64 floats, so a score is eight vector
+    /// operations, and re-deriving a bounds-checked span for each of the ~14 million
+    /// query-key pairs in a forward pass costs more than the arithmetic it guards. The values are
+    /// also gathered into a contiguous block first, because they are otherwise strided by the
+    /// packed QKV layout and every accumulation step would touch a different cache line.</para>
+    /// </summary>
+    private unsafe void Attention(float[] qkv, IReadOnlyList<Segment> segments, AttentionKind kind,
+        float[] destination, (Segment Segment, int Head)[] units)
     {
         int hidden = _config.HiddenSize;
-        int heads = _config.NumAttentionHeads;
         int headDim = _config.HeadDim;
         int stride = 3 * hidden;
         float scale = 1f / MathF.Sqrt(headDim);
         int window = kind == AttentionKind.Sliding ? _config.SlidingHalfWindow : int.MaxValue;
         var rope = kind == AttentionKind.Global ? _globalRope : _localRope;
 
-        // One unit of work per (segment, head): they are independent and write disjoint output.
-        var units = new List<(Segment Segment, int Head)>(segments.Count * heads);
-        foreach (var segment in segments)
-        {
-            for (int head = 0; head < heads; ++head) units.Add((segment, head));
-        }
-
-        Parallel.For(0, units.Count, unit =>
+        Parallel.For(0, units.Length, LayaRuntime.ParallelOptions, unit =>
         {
             var (segment, head) = units[unit];
             int length = segment.Length;
@@ -216,44 +238,70 @@ public sealed class ModernBertEncoder
             int kBase = hidden + head * headDim;
             int vBase = 2 * hidden + head * headDim;
 
-            float[] query = new float[length * headDim];
-            float[] key = new float[length * headDim];
-            for (int t = 0; t < length; ++t)
+            float[] rented = ArrayPool<float>.Shared.Rent(3 * length * headDim + length);
+            try
             {
-                int row = segment.Start + t;
-                qkv.AsSpan(row * stride + qBase, headDim).CopyTo(query.AsSpan(t * headDim, headDim));
-                qkv.AsSpan(row * stride + kBase, headDim).CopyTo(key.AsSpan(t * headDim, headDim));
-                // Positions restart at 0 for every sequence, as they do in a padded batch.
-                rope.Apply(query.AsSpan(t * headDim, headDim), t);
-                rope.Apply(key.AsSpan(t * headDim, headDim), t);
+                fixed (float* source = qkv, output = destination, scratch = rented)
+                {
+                    float* query = scratch;
+                    float* key = query + length * headDim;
+                    float* value = key + length * headDim;
+                    float* scores = value + length * headDim;
+
+                    for (int t = 0; t < length; ++t)
+                    {
+                        float* row = source + (long)(segment.Start + t) * stride;
+                        Buffer.MemoryCopy(row + qBase, query + t * headDim, headDim * 4, headDim * 4);
+                        Buffer.MemoryCopy(row + kBase, key + t * headDim, headDim * 4, headDim * 4);
+                        Buffer.MemoryCopy(row + vBase, value + t * headDim, headDim * 4, headDim * 4);
+
+                        // Positions restart at 0 for every sequence, as they do in a padded batch.
+                        rope.Apply(new Span<float>(query + t * headDim, headDim), t);
+                        rope.Apply(new Span<float>(key + t * headDim, headDim), t);
+                    }
+
+                    for (int t = 0; t < length; ++t)
+                    {
+                        int first = window == int.MaxValue ? 0 : Math.Max(0, t - window);
+                        int last = window == int.MaxValue ? length - 1 : Math.Min(length - 1, t + window);
+                        int count = last - first + 1;
+
+                        float* q = query + t * headDim;
+                        float* k = key + first * headDim;
+                        for (int j = 0; j < count; ++j, k += headDim)
+                        {
+                            scores[j] = SimdOps.Dot(q, k, headDim) * scale;
+                        }
+                        SimdOps.Softmax(new Span<float>(scores, count));
+
+                        float* destinationRow = output + (long)(segment.Start + t) * hidden + head * headDim;
+                        new Span<float>(destinationRow, headDim).Clear();
+                        float* v = value + first * headDim;
+                        for (int j = 0; j < count; ++j, v += headDim)
+                        {
+                            float weight = scores[j];
+                            if (weight != 0f) SimdOps.AddScaled(destinationRow, v, headDim, weight);
+                        }
+                    }
+                }
             }
-
-            float[] scores = new float[length];
-            for (int t = 0; t < length; ++t)
+            finally
             {
-                int first = window == int.MaxValue ? 0 : Math.Max(0, t - window);
-                int last = window == int.MaxValue ? length - 1 : Math.Min(length - 1, t + window);
-                int count = last - first + 1;
-
-                var q = query.AsSpan(t * headDim, headDim);
-                var active = scores.AsSpan(0, count);
-                for (int j = 0; j < count; ++j)
-                {
-                    active[j] = SimdOps.Dot(q, key.AsSpan((first + j) * headDim, headDim)) * scale;
-                }
-                SimdOps.Softmax(active);
-
-                var output = destination.AsSpan((segment.Start + t) * hidden + head * headDim, headDim);
-                output.Clear();
-                for (int j = 0; j < count; ++j)
-                {
-                    float weight = active[j];
-                    if (weight == 0f) continue;
-                    var value = qkv.AsSpan((segment.Start + first + j) * stride + vBase, headDim);
-                    for (int d = 0; d < headDim; ++d) output[d] += weight * value[d];
-                }
+                ArrayPool<float>.Shared.Return(rented);
             }
         });
+    }
+
+    /// <summary>The (segment, head) work items, built once per call and reused by every layer.</summary>
+    private (Segment Segment, int Head)[] AttentionUnits(IReadOnlyList<Segment> segments)
+    {
+        var units = new (Segment, int)[segments.Count * _config.NumAttentionHeads];
+        int index = 0;
+        foreach (var segment in segments)
+        {
+            for (int head = 0; head < _config.NumAttentionHeads; ++head) units[index++] = (segment, head);
+        }
+        return units;
     }
 }
 

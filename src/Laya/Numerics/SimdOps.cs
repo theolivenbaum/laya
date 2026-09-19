@@ -96,6 +96,63 @@ public static class SimdOps
         for (; i < destination.Length; ++i) destination[i] += source[i];
     }
 
+    /// <summary>
+    /// Dot product over <paramref name="length"/> floats at raw addresses — the attention inner
+    /// loop, where re-deriving a bounds-checked span per call costs more than the arithmetic.
+    /// </summary>
+    public static unsafe float Dot(float* a, float* b, int length)
+    {
+        int width = Vector<float>.Count;
+        var s0 = Vector<float>.Zero;
+        var s1 = Vector<float>.Zero;
+        int i = 0;
+        for (; i <= length - 2 * width; i += 2 * width)
+        {
+            s0 = FusedAdd(Vector.Load(a + i), Vector.Load(b + i), s0);
+            s1 = FusedAdd(Vector.Load(a + i + width), Vector.Load(b + i + width), s1);
+        }
+        for (; i <= length - width; i += width)
+        {
+            s0 = FusedAdd(Vector.Load(a + i), Vector.Load(b + i), s0);
+        }
+        float sum = Vector.Sum(s0) + Vector.Sum(s1);
+        for (; i < length; ++i) sum += a[i] * b[i];
+        return sum;
+    }
+
+    /// <summary><c>destination += source * scale</c> at raw addresses.</summary>
+    public static unsafe void AddScaled(float* destination, float* source, int length, float scale)
+    {
+        int width = Vector<float>.Count;
+        var factor = new Vector<float>(scale);
+        int i = 0;
+        for (; i <= length - width; i += width)
+        {
+            FusedAdd(Vector.Load(source + i), factor, Vector.Load(destination + i)).Store(destination + i);
+        }
+        for (; i < length; ++i) destination[i] += source[i] * scale;
+    }
+
+    /// <summary>
+    /// <c>destination += source * scale</c>.
+    ///
+    /// <para>This is the attention value accumulation. Written as a scalar loop it is one of the
+    /// slowest things in the forward pass; the head dimension is only 64 floats, so the loop
+    /// overhead dominates unless it is vectorized.</para>
+    /// </summary>
+    public static void AddScaled(Span<float> destination, ReadOnlySpan<float> source, float scale)
+    {
+        int width = Vector<float>.Count;
+        var factor = new Vector<float>(scale);
+        int i = 0;
+        for (; i <= destination.Length - width; i += width)
+        {
+            var accumulated = FusedAdd(Vector.LoadUnsafe(in source[i]), factor, Vector.LoadUnsafe(in destination[i]));
+            accumulated.StoreUnsafe(ref destination[i]);
+        }
+        for (; i < destination.Length; ++i) destination[i] += source[i] * scale;
+    }
+
     /// <summary><c>destination *= source</c>, elementwise.</summary>
     public static void Multiply(Span<float> destination, ReadOnlySpan<float> source)
     {
@@ -239,14 +296,97 @@ public static class SimdOps
     /// Exact GELU, <c>x * 0.5 * (1 + erf(x / sqrt(2)))</c>. This is what <c>nn.GELU()</c> and
     /// transformers' <c>GELUActivation</c> compute by default, so the tanh approximation is
     /// deliberately not used: it differs by up to ~1e-3 and that shows up in parity dumps.
+    ///
+    /// <para>The encoder evaluates this about 30 million times per call, so it is vectorized
+    /// end to end — including the exponential inside <c>erf</c>. A scalar
+    /// <see cref="Math.Exp(double)"/> per element made this single elementwise operation
+    /// one of the most expensive stages in the whole forward pass.</para>
     /// </summary>
     public static void Gelu(Span<float> values)
     {
-        for (int i = 0; i < values.Length; ++i)
+        int width = Vector<float>.Count;
+        var half = new Vector<float>(0.5f);
+        var one = Vector<float>.One;
+        var invSqrt2 = new Vector<float>(InvSqrt2);
+
+        int i = 0;
+        for (; i <= values.Length - width; i += width)
+        {
+            var x = Vector.LoadUnsafe(in values[i]);
+            (x * half * (one + Erf(x * invSqrt2))).StoreUnsafe(ref values[i]);
+        }
+        for (; i < values.Length; ++i)
         {
             float x = values[i];
             values[i] = 0.5f * x * (1f + Erf(x * InvSqrt2));
         }
+    }
+
+    /// <summary>
+    /// Vectorized error function, the same Numerical Recipes rational form as the scalar
+    /// <see cref="Erf(float)"/> and accurate to about 1.2e-7 relative.
+    /// </summary>
+    public static Vector<float> Erf(Vector<float> value)
+    {
+        var one = Vector<float>.One;
+        var sign = Vector.ConditionalSelect(Vector.LessThan(value, Vector<float>.Zero),
+            new Vector<float>(-1f), one);
+        var ax = Vector.Abs(value);
+
+        var t = one / (one + new Vector<float>(0.5f) * ax);
+
+        // Horner, outermost coefficient last — the same nesting as the scalar version.
+        var poly = new Vector<float>(0.17087277f);
+        poly = Vector.FusedMultiplyAdd(poly, t, new Vector<float>(-0.82215223f));
+        poly = Vector.FusedMultiplyAdd(poly, t, new Vector<float>(1.48851587f));
+        poly = Vector.FusedMultiplyAdd(poly, t, new Vector<float>(-1.13520398f));
+        poly = Vector.FusedMultiplyAdd(poly, t, new Vector<float>(0.27886807f));
+        poly = Vector.FusedMultiplyAdd(poly, t, new Vector<float>(-0.18628806f));
+        poly = Vector.FusedMultiplyAdd(poly, t, new Vector<float>(0.09678418f));
+        poly = Vector.FusedMultiplyAdd(poly, t, new Vector<float>(0.37409196f));
+        poly = Vector.FusedMultiplyAdd(poly, t, new Vector<float>(1.00002368f));
+        poly = Vector.FusedMultiplyAdd(poly, t, new Vector<float>(-1.26551223f));
+        poly -= ax * ax;
+
+        var y = t * Exp(poly);
+
+        // Beyond |x| ~ 6 the series underflows anyway; clamping keeps the exponential in range.
+        var saturated = Vector.GreaterThan(ax, new Vector<float>(6f));
+        return sign * Vector.ConditionalSelect(saturated, one, one - y);
+    }
+
+    private const float Log2E = 1.4426950408889634f;
+    private const float Ln2High = 0.693359375f;
+    private const float Ln2Low = -2.12194440e-4f;
+
+    /// <summary>
+    /// Vectorized <c>exp</c> for float lanes: range-reduce to <c>2^n · e^r</c> with
+    /// <c>|r| &lt;= ln2/2</c>, evaluate a degree-6 Taylor series on <c>r</c>, and build
+    /// <c>2^n</c> by writing the exponent field directly. Accurate to about 1 ulp over the range
+    /// <c>erf</c> asks for, and roughly twenty times faster than a scalar library call per lane.
+    /// </summary>
+    public static Vector<float> Exp(Vector<float> value)
+    {
+        // exp overflows float at ~88.7 and flushes to zero at ~-87.3.
+        var x = Vector.Min(Vector.Max(value, new Vector<float>(-87.3f)), new Vector<float>(88.7f));
+
+        var n = Vector.Floor(Vector.FusedMultiplyAdd(x, new Vector<float>(Log2E), new Vector<float>(0.5f)));
+        var r = Vector.FusedMultiplyAdd(n, new Vector<float>(-Ln2High), x);
+        r = Vector.FusedMultiplyAdd(n, new Vector<float>(-Ln2Low), r);
+
+        // e^r = 1 + r + r²/2 + r³/6 + r⁴/24 + r⁵/120 + r⁶/720
+        var p = new Vector<float>(1f / 720f);
+        p = Vector.FusedMultiplyAdd(p, r, new Vector<float>(1f / 120f));
+        p = Vector.FusedMultiplyAdd(p, r, new Vector<float>(1f / 24f));
+        p = Vector.FusedMultiplyAdd(p, r, new Vector<float>(1f / 6f));
+        p = Vector.FusedMultiplyAdd(p, r, new Vector<float>(0.5f));
+        p = Vector.FusedMultiplyAdd(p, r, Vector<float>.One);
+        p = Vector.FusedMultiplyAdd(p, r, Vector<float>.One);
+
+        // 2^n by placing n + 127 into the exponent field.
+        var exponent = Vector.ConvertToInt32(n) + new Vector<int>(127);
+        var scale = Vector.ShiftLeft(exponent, 23).As<int, float>();
+        return p * scale;
     }
 
     /// <summary>Elementwise ReLU — the default activation of <c>nn.TransformerEncoderLayer</c>.</summary>
@@ -263,9 +403,10 @@ public static class SimdOps
     }
 
     /// <summary>
-    /// Abramowitz &amp; Stegun 7.1.26 is not accurate enough for parity work (~1.5e-7 absolute,
-    /// but biased), so this is the rational Chebyshev form used by <c>std::erf</c>-grade
-    /// implementations: max error below 1e-7 with no bias, computed in double.
+    /// Scalar error function. Abramowitz &amp; Stegun 7.1.26 is not accurate enough for parity work
+    /// (~1.5e-7 absolute, but biased), so this is the Numerical Recipes rational form: max error
+    /// below 1e-7 with no bias, computed in double. <see cref="Erf(Vector{float})"/> is the
+    /// vectorized float equivalent and is what the hot paths use.
     /// </summary>
     public static float Erf(float value)
     {

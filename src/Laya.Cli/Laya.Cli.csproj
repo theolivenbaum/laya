@@ -13,4 +13,8 @@
   <ItemGroup>
     <ProjectReference Include="../Laya/Laya.csproj" />
   </ItemGroup>
+  <ItemGroup>
+    <!-- `laya profile` captures a sampling profile and an allocation report of its own process. -->
+    <PackageReference Include="Memory.Introspect" Version="26.9.5437" />
+  </ItemGroup>
 </Project>

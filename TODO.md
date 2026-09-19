@@ -57,13 +57,26 @@ Status key: `[ ]` not started · `[~]` in progress · `[x]` done
 - [x] README rewrite for the .NET package
 - [ ] Re-enable CI as a .NET workflow (left disabled per the port brief)
 
-## Performance work (done, with what is left)
+## Performance work
 - [x] Concatenated-batch forward pass — the weights are streamed once per call, not once per question
 - [x] Panel-packed weights + broadcast GEMM kernel
 - [x] Explicit AVX-512 path with `LAYA_VECTOR_BITS` override
-- [ ] Cache blocking over the reduction dimension; still ~3.5x behind oneDNN
-- [ ] Keep weights in fp16 and widen per tile, to halve the weight bandwidth
-- [ ] Reuse buffers across layers instead of allocating per forward pass
+- [x] `laya profile`: per-stage timings, allocation totals, in-process CPU sampling and allocation
+      reports via `Memory.Introspect`
+- [x] `benchmarks/Laya.Benchmarks`: BenchmarkDotNet suites for the GEMM shapes, the elementwise
+      kernels and the whole forward pass, single- and multi-threaded
+- [x] `LayaRuntime.MaxDegreeOfParallelism` / `LAYA_THREADS`, so single-thread work is measurable
+- [x] Fix the accumulator spill in the GEMM inner loop (3x, single-threaded)
+- [x] Vectorized `Gelu`/`Erf`/`Exp` (7.6x on that stage)
+- [x] Pooled scratch buffers: 144 MiB -> 1.8 MiB allocated per call, zero GC collections
+- [x] Tune the register block: 6 token rows per pass, measured against 4/8/10/12
+- [x] Release the safetensors mapping after load (-0.8 GiB working set)
+- [ ] Cache blocking over the reduction dimension — the GEMM is at ~50% of this machine's
+      single-core AVX-512 roof, and the rest looks like 512-bit downclocking plus L2 bandwidth
+- [ ] Attention: keys in SIMD lanes instead of a dot product per query-key pair, to remove the
+      horizontal reductions (attention is ~19% of a pass)
+- [ ] fp16 or bf16 weight storage to halve the 1.57 GiB resident — needs a vectorized widening
+      path, and bf16 alone would breach the parity budget
 
 ## Known gaps / deliberate deviations
 - The multilingual checkpoint's `encoder/config.json` says `position_embedding_type: "sans_pos"`.

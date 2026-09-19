@@ -19,8 +19,6 @@ namespace Laya;
 /// </summary>
 public sealed class Agent : IDecisionEngine
 {
-    private readonly SafetensorsFile _weights;
-
     public LayaConfig Config { get; }
     public ModernBertConfig EncoderConfig { get; }
     public HuggingFaceTokenizer Tokenizer { get; }
@@ -34,7 +32,6 @@ public sealed class Agent : IDecisionEngine
         Config = config;
         EncoderConfig = encoderConfig;
         Tokenizer = tokenizer;
-        _weights = weights;
         Model = new DecisionModel(encoderConfig, config, weights);
     }
 
@@ -90,7 +87,10 @@ public sealed class Agent : IDecisionEngine
                 $"'{directory}': the tokenizer is missing one of [CLS]/[SEP]/[MASK]; sequence building needs all three.");
         }
 
-        var weights = new SafetensorsFile(weightsPath);
+        // Every tensor is widened into managed memory during construction, so the mapping is only
+        // needed while the model is being built. Releasing it here keeps the checkpoint's 800 MB of
+        // file pages out of the working set for the life of the agent.
+        using var weights = new SafetensorsFile(weightsPath);
         VerifyCompatibility(weights, directory);
         return new Agent(directory, config, encoderConfig, tokenizer, weights);
     }
@@ -279,7 +279,12 @@ public sealed class Agent : IDecisionEngine
         return index < Config.Temperature.Count ? Config.Temperature[index] : 1f;
     }
 
-    public void Dispose() => _weights.Dispose();
+    /// <summary>
+    /// Nothing unmanaged is held after construction; the method exists so an
+    /// <see cref="IDecisionEngine"/> can be disposed uniformly, and so a future backend that does
+    /// hold resources does not change the API.
+    /// </summary>
+    public void Dispose() => GC.SuppressFinalize(this);
 
     private sealed class PrefixedRecorder(IStateRecorder inner, string prefix) : IStateRecorder
     {

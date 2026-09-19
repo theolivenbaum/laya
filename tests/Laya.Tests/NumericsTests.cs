@@ -1,3 +1,4 @@
+using System.Numerics;
 using Laya.Models;
 using Laya.Numerics;
 using Xunit;
@@ -162,6 +163,47 @@ public class NumericsTests
         var values = new[] { input };
         SimdOps.Gelu(values);
         Assert.Equal(expected, values[0], 5);
+    }
+
+    [Fact]
+    public void VectorExpMatchesTheLibraryCall()
+    {
+        // The vectorized exp is only as good as its range reduction; check it across the span erf
+        // asks for, including the saturating ends.
+        for (double x = -87.0; x <= 88.0; x += 0.37)
+        {
+            var actual = SimdOps.Exp(new System.Numerics.Vector<float>((float)x));
+            float expected = MathF.Exp((float)x);
+            float tolerance = MathF.Max(MathF.Abs(expected) * 2e-6f, float.Epsilon);
+            Assert.True(MathF.Abs(actual[0] - expected) <= tolerance,
+                $"exp({x}): expected {expected}, got {actual[0]}");
+        }
+    }
+
+    [Fact]
+    public void VectorErfAgreesWithTheScalarOne()
+    {
+        for (double x = -8.0; x <= 8.0; x += 0.013)
+        {
+            var actual = SimdOps.Erf(new System.Numerics.Vector<float>((float)x));
+            float expected = SimdOps.Erf((float)x);
+            Assert.True(MathF.Abs(actual[0] - expected) <= 3e-6f,
+                $"erf({x}): scalar {expected}, vector {actual[0]}");
+        }
+    }
+
+    [Fact]
+    public void GeluIsTheSameForEveryLaneAlignment()
+    {
+        // The vector body and the scalar tail must agree, or a tensor's last few channels drift.
+        var random = new Random(42);
+        var values = new float[Vector<float>.Count * 3 + 5];
+        for (int i = 0; i < values.Length; ++i) values[i] = (float)(random.NextDouble() * 16 - 8);
+
+        var expected = values.Select(v => 0.5f * v * (1f + SimdOps.Erf(v * 0.70710678f))).ToArray();
+        SimdOps.Gelu(values);
+
+        for (int i = 0; i < values.Length; ++i) Assert.Equal(expected[i], values[i], 5);
     }
 
     [Fact]

@@ -51,3 +51,6 @@ bin/
 obj/
 *.user
 artifacts/
+
+# BenchmarkDotNet
+BenchmarkDotNet.Artifacts/

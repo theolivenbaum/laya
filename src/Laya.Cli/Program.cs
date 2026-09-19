@@ -28,6 +28,12 @@ internal static class Program
         }
 
         var options = CommandLine.Parse(args.AsSpan(1));
+        if (options.Value("threads") is string threads
+            && int.TryParse(threads, CultureInfo.InvariantCulture, out int degree))
+        {
+            LayaRuntime.MaxDegreeOfParallelism = degree;
+        }
+
         try
         {
             return args[0] switch
@@ -39,6 +45,7 @@ internal static class Program
                 "tokenize" => Tokenize(options),
                 "dump-states" => DumpStates(options),
                 "bench" => Bench(options),
+                "profile" => ProfileCommand.Run(options, OpenAgent, ReadState, ReadQuestions),
                 _ => Unknown(args[0]),
             };
         }
@@ -71,6 +78,7 @@ internal static class Program
           tokenize      Tokenize text with a checkpoint's tokenizer
           dump-states   Write per-layer activations for parity checking
           bench         Time the forward pass
+          profile       Stage timings, allocations and a sampling profile of a forward pass
 
         COMMON OPTIONS
           --model <name>        english | multilingual | typed-decisions   (default: english)
@@ -80,6 +88,7 @@ internal static class Program
           --model-dir <path>    Use a checkpoint already on disk instead of downloading
           --cache <path>        Download cache root (default: ~/.cache/laya or $LAYA_HOME)
           --token <token>       Hugging Face token (default: $HF_TOKEN)
+          --threads <n>         Kernel threads (default: $LAYA_THREADS, else every core)
 
         EXAMPLES
           laya download --model english --cache ./artifacts/models
@@ -87,6 +96,8 @@ internal static class Program
           laya predict --model-dir ./artifacts/models/english --preset triage \
                        --text "I was charged twice and nobody answers"
           laya route --text "Mein Konto wurde zweimal belastet"
+          laya profile --model-dir ./artifacts/models/english --preset triage \
+                       --text "…" --threads 1 --no-trace
           laya dump-states --model-dir ./artifacts/models/english \
                            --text "hello" --question noul:"Is this a greeting?" \
                            --out artifacts/dumps/dotnet.json
@@ -222,7 +233,9 @@ internal static class Program
         }
         timings.Sort();
         Console.WriteLine(string.Format(CultureInfo.InvariantCulture,
-            "median {0:F1} ms  ({1})", timings[timings.Count / 2], Numerics.SimdOps.Capabilities));
+            "median {0:F1} ms, {1:F1} ms/question  ({2})",
+            timings[timings.Count / 2], timings[timings.Count / 2] / Math.Max(1, questions.Count),
+            LayaRuntime.Describe()));
         return 0;
     }
 

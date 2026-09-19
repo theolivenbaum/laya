@@ -105,6 +105,34 @@ developed against a .NET 10 SDK, and unverifiable intrinsics behind `#if NET11_0
 be a parity risk. `SimdOps.Capabilities` reports the running target framework, so a net11-only path
 has somewhere obvious to land.
 
+## Measuring before changing
+
+Performance work on this port has one rule: measure first, and measure the thing you are about to
+change. Three tools, in the order they are usually useful:
+
+```bash
+# 1. Where does the time go, and what is allocated? Single-threaded by default.
+dotnet run --project src/Laya.Cli -c Release -- profile \
+    --model-dir artifacts/models/english --preset triage --text "…" --threads 1 --no-trace
+
+# 2. Which method is on the CPU? (drops --no-trace: in-process sampling via Memory.Introspect)
+dotnet run --project src/Laya.Cli -c Release -- profile --model-dir … --preset triage --text "…"
+
+# 3. Steady-state numbers for one kernel
+dotnet run --project benchmarks/Laya.Benchmarks -c Release -- --filter '*Gemm*'
+```
+
+`LAYA_THREADS=1` (or `--threads 1`) pins the kernels to one thread; always tune single-threaded
+first, because a parallel measurement hides a kernel problem behind memory bandwidth.
+`LAYA_VECTOR_BITS=256|512` picks the GEMM kernel.
+
+When a kernel is slower than its instruction mix says it should be, read the disassembly before
+theorising:
+
+```bash
+DOTNET_JitDisasm="Panel512" DOTNET_TieredCompilation=0 dotnet run -c Release …
+```
+
 ## Build & test
 
 ```bash
@@ -140,3 +168,18 @@ model; parity tests are skipped when `artifacts/` is empty.
 - Transposing the weights only pays with a *panel* layout. A plain `[in, out]` transpose makes the
   inner loop stride across the whole output dimension and measured 3x slower than the naive
   dot-product kernel.
+- **Never pass an accumulator vector by value to a helper inside a hot loop.** `PackedMatrix` used
+  to hand its eight `Vector512<float>` accumulators to a small `Store` method. The JIT declined to
+  inline it (a 64-byte struct argument goes to the stack), the accumulators became address
+  exposed, and *every FMA in the inner loop* was followed by a 64-byte spill and a reload on the
+  next iteration. The kernel ran at a third of its speed and the instruction mix looked perfectly
+  reasonable in the source. Seeding the accumulators with the bias and storing inline fixed it.
+  When a kernel is inexplicably slow, `DOTNET_JitDisasm` first.
+- Scalar `Math.Exp` per element is not an option in anything the encoder runs. `Gelu` computes an
+  `erf`, and a scalar implementation made one elementwise operation 14% of the whole forward pass;
+  the vectorized `SimdOps.Exp` brought that stage down 7.6x.
+- Rent scratch from `ArrayPool`, do not allocate it. The attention units allocated their rotated
+  query and key per (segment, head, layer): 144 MiB of garbage per call, versus 1.8 MiB now.
+- A benchmark of an in-place kernel must restore its input **per invocation**, not per iteration.
+  Repeated in-place `Gelu` walks its values down to denormals, and denormal arithmetic traps to
+  microcode — the benchmark then reports a kernel forty times slower than it is.

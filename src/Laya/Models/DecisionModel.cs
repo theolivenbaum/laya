@@ -1,3 +1,4 @@
+using System.Buffers;
 using Laya.Diagnostics;
 using Laya.Io;
 using Laya.Numerics;
@@ -36,6 +37,9 @@ public sealed class DecisionModel
     private readonly float[] _actLinear2;
     private readonly float[] _actLinear2Bias;
     private readonly int _actionCount;
+
+    /// <summary>Bytes the repacked weights occupy in managed memory.</summary>
+    public long WeightBytes { get; }
 
     /// <summary>The <c>temperature</c> buffer stored in the checkpoint (one per question type).</summary>
     public float[] CheckpointTemperature { get; }
@@ -84,6 +88,13 @@ public sealed class DecisionModel
         _actionCount = _actLinear2Bias.Length;
 
         CheckpointTemperature = weights.Contains("temperature") ? weights.ReadFloat32("temperature") : [1f, 1f, 1f];
+
+        WeightBytes = _encoder.WeightBytes
+            + (long)sizeof(float) * (_typeEmbedding.Length + _scorerNormWeight.Length + _scorerNormBias.Length
+                + _scorerLinear1.Length + _scorerLinear1Bias.Length + _scorerLinear2.Length + _scorerLinear2Bias.Length
+                + _actLinear1.Length + _actLinear1Bias.Length + _actLinear2.Length + _actLinear2Bias.Length)
+            + _headLayers.Sum(l => l.InProjWeight.Bytes + l.OutProjWeight.Bytes
+                + l.Linear1Weight.Bytes + l.Linear2Weight.Bytes);
     }
 
     /// <summary>Number of heads the decision head uses: <c>max(1, hidden / 64)</c>, as in Python.</summary>
@@ -224,68 +235,116 @@ public sealed class DecisionModel
         int headDim = hidden / heads;
         float scale = 1f / MathF.Sqrt(headDim);
 
-        var normed = new float[tokens * hidden];
-        for (int t = 0; t < tokens; ++t)
+        using var scratch = new ScratchBuffers();
+        var normed = scratch.Rent(tokens * hidden);
+        using (ForwardTiming.Measure("head.norm"))
         {
-            SimdOps.LayerNorm(states.AsSpan(t * hidden, hidden), layer.Norm1Weight, layer.Norm1Bias, 1e-5f,
-                normed.AsSpan(t * hidden, hidden));
+            for (int t = 0; t < tokens; ++t)
+            {
+                SimdOps.LayerNorm(states.AsSpan(t * hidden, hidden), layer.Norm1Weight, layer.Norm1Bias, 1e-5f,
+                    normed.AsSpan(t * hidden, hidden));
+            }
         }
 
-        var qkv = new float[tokens * 3 * hidden];
-        layer.InProjWeight.Multiply(normed, tokens, layer.InProjBias, qkv);
+        var qkv = scratch.Rent(tokens * 3 * hidden);
+        using (ForwardTiming.Measure("head.qkv"))
+        {
+            layer.InProjWeight.Multiply(normed.AsSpan(0, tokens * hidden), tokens, layer.InProjBias,
+                qkv.AsSpan(0, tokens * 3 * hidden));
+        }
 
-        var context = new float[tokens * hidden];
+        var context = scratch.Rent(tokens * hidden);
         int stride = 3 * hidden;
-        var units = new List<(Segment Segment, int Head)>(segments.Count * heads);
+        var units = new (Segment Segment, int Head)[segments.Count * heads];
+        int unitIndex = 0;
         foreach (var segment in segments)
         {
-            for (int head = 0; head < heads; ++head) units.Add((segment, head));
+            for (int head = 0; head < heads; ++head) units[unitIndex++] = (segment, head);
         }
 
-        Parallel.For(0, units.Count, unit =>
+        using var attentionStage = ForwardTiming.Measure("head.attention");
+        HeadAttention(qkv, context, segments, units, hidden, headDim, scale);
+        attentionStage.Dispose();
+
+        var projected = scratch.Rent(tokens * hidden);
+        using (ForwardTiming.Measure("head.attn_out"))
         {
-            var (segment, head) = units[unit];
-            int length = segment.Length;
-            var scores = new float[length];
-            for (int t = 0; t < length; ++t)
+            layer.OutProjWeight.Multiply(context.AsSpan(0, tokens * hidden), tokens, layer.OutProjBias,
+                projected.AsSpan(0, tokens * hidden));
+        }
+        SimdOps.Add(states.AsSpan(0, tokens * hidden), projected.AsSpan(0, tokens * hidden));
+
+        using (ForwardTiming.Measure("head.norm"))
+        {
+            for (int t = 0; t < tokens; ++t)
             {
-                int row = segment.Start + t;
-                var query = qkv.AsSpan(row * stride + head * headDim, headDim);
-                for (int j = 0; j < length; ++j)
-                {
-                    scores[j] = SimdOps.Dot(query,
-                        qkv.AsSpan((segment.Start + j) * stride + hidden + head * headDim, headDim)) * scale;
-                }
-                SimdOps.Softmax(scores);
-
-                var output = context.AsSpan(row * hidden + head * headDim, headDim);
-                output.Clear();
-                for (int j = 0; j < length; ++j)
-                {
-                    float weight = scores[j];
-                    if (weight == 0f) continue;
-                    var value = qkv.AsSpan((segment.Start + j) * stride + 2 * hidden + head * headDim, headDim);
-                    for (int d = 0; d < headDim; ++d) output[d] += weight * value[d];
-                }
+                SimdOps.LayerNorm(states.AsSpan(t * hidden, hidden), layer.Norm2Weight, layer.Norm2Bias, 1e-5f,
+                    normed.AsSpan(t * hidden, hidden));
             }
-        });
-
-        var projected = new float[tokens * hidden];
-        layer.OutProjWeight.Multiply(context, tokens, layer.OutProjBias, projected);
-        SimdOps.Add(states.AsSpan(0, tokens * hidden), projected);
-
-        for (int t = 0; t < tokens; ++t)
-        {
-            SimdOps.LayerNorm(states.AsSpan(t * hidden, hidden), layer.Norm2Weight, layer.Norm2Bias, 1e-5f,
-                normed.AsSpan(t * hidden, hidden));
         }
 
         int feedForward = layer.Linear1Bias.Length;
-        var wide = new float[tokens * feedForward];
-        layer.Linear1Weight.Multiply(normed, tokens, layer.Linear1Bias, wide);
-        SimdOps.Relu(wide);
-        layer.Linear2Weight.Multiply(wide, tokens, layer.Linear2Bias, projected);
-        SimdOps.Add(states.AsSpan(0, tokens * hidden), projected);
+        var wide = scratch.Rent(tokens * feedForward);
+        using (ForwardTiming.Measure("head.ff_in"))
+        {
+            layer.Linear1Weight.Multiply(normed.AsSpan(0, tokens * hidden), tokens, layer.Linear1Bias,
+                wide.AsSpan(0, tokens * feedForward));
+        }
+        using (ForwardTiming.Measure("head.relu")) SimdOps.Relu(wide.AsSpan(0, tokens * feedForward));
+        using (ForwardTiming.Measure("head.ff_out"))
+        {
+            layer.Linear2Weight.Multiply(wide.AsSpan(0, tokens * feedForward), tokens, layer.Linear2Bias,
+                projected.AsSpan(0, tokens * hidden));
+        }
+        SimdOps.Add(states.AsSpan(0, tokens * hidden), projected.AsSpan(0, tokens * hidden));
+    }
+
+    /// <summary>
+    /// Full attention inside each question's own sequence, on pointers for the same reason the
+    /// encoder's is: the head dimension is 64 floats, so per-pair span construction dominates.
+    /// </summary>
+    private static unsafe void HeadAttention(float[] qkv, float[] context, IReadOnlyList<Segment> segments,
+        (Segment Segment, int Head)[] units, int hidden, int headDim, float scale)
+    {
+        int stride = 3 * hidden;
+        Parallel.For(0, units.Length, LayaRuntime.ParallelOptions, unit =>
+        {
+            var (segment, head) = units[unit];
+            int length = segment.Length;
+            float[] rented = ArrayPool<float>.Shared.Rent(length);
+            try
+            {
+                fixed (float* source = qkv, output = context, scores = rented)
+                {
+                    float* keys = source + (long)segment.Start * stride + hidden + head * headDim;
+                    float* values = source + (long)segment.Start * stride + 2 * hidden + head * headDim;
+
+                    for (int t = 0; t < length; ++t)
+                    {
+                        float* query = source + (long)(segment.Start + t) * stride + head * headDim;
+                        float* k = keys;
+                        for (int j = 0; j < length; ++j, k += stride)
+                        {
+                            scores[j] = SimdOps.Dot(query, k, headDim) * scale;
+                        }
+                        SimdOps.Softmax(new Span<float>(scores, length));
+
+                        float* destination = output + (long)(segment.Start + t) * hidden + head * headDim;
+                        new Span<float>(destination, headDim).Clear();
+                        float* v = values;
+                        for (int j = 0; j < length; ++j, v += stride)
+                        {
+                            float weight = scores[j];
+                            if (weight != 0f) SimdOps.AddScaled(destination, v, headDim, weight);
+                        }
+                    }
+                }
+            }
+            finally
+            {
+                ArrayPool<float>.Shared.Return(rented);
+            }
+        });
     }
 
     private sealed class HeadLayer

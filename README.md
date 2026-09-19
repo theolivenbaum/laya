@@ -227,20 +227,54 @@ compared in one pass rather than generated one token at a time.
   vectors, so the kernel reaches for them directly. `LAYA_VECTOR_BITS=256` opts out.
 - **Everything computes in fp32.** The checkpoints are fp16 on disk and widened once at load,
   which is what PyTorch does on CPU too — and what the parity tolerances are measured against.
+  Keeping them fp16 in memory would halve the 1.57 GiB the weights occupy, but there is no
+  vectorized fp16-to-fp32 widening to lean on, and bf16 would cost more accuracy than the parity
+  budget allows.
+- **Scratch is rented, not allocated.** Every buffer a pass needs is the same size every time and
+  dies immediately, so they come from the array pool. This is the difference between 144 MiB of
+  garbage per call and 1.8 MiB.
 
 ### Performance
 
-On a 4-core Xeon @ 2.8 GHz (AVX-512), the 5-question triage preset over a 400-token batch:
+Measured on a 4-core Xeon @ 2.8 GHz with AVX-512, on the 5-question triage preset over a paragraph
+of state (404 tokens in total). PyTorch is the reference implementation in `.reference/` on the
+same machine and the same weights.
 
-| | median |
-|---|---|
-| this port, AVX-512 | 4.9 s |
-| this port, AVX2 (`LAYA_VECTOR_BITS=256`) | 6.1 s |
-| PyTorch 2.14 CPU (same machine, same weights) | 1.4 s |
+| | 1 thread | 4 threads |
+|---|---|---|
+| this port | **4.47 s** | **1.53 s** |
+| PyTorch 2.14 CPU (oneDNN) | 4.15 s | 1.42 s |
+| this port, before the optimization pass | 16.5 s | 4.9 s |
 
-PyTorch is still ~3.5x ahead: oneDNN's GEMM is hand-tuned assembly with full cache blocking, and
-this kernel is portable managed code. Use `laya bench` to measure your own hardware. GPU execution
-is out of scope for this port.
+Per call, in steady state: **1.8 MiB** allocated, **zero** GC collections, **2.0 GiB** working set
+(1.57 GiB of that is the fp32 weights).
+
+The projection kernel, which is ~70% of a forward pass:
+
+| projection | shape | 1 thread | 4 threads |
+|---|---|---|---|
+| `mlp_in` | 404 × 1024 × 5248 | 49.5 ms — 88 GFLOP/s | 20.3 ms — 214 GFLOP/s |
+| `qkv` | 404 × 1024 × 3072 | 30.2 ms — 84 GFLOP/s | 13.5 ms — 189 GFLOP/s |
+| `mlp_out` | 404 × 2624 × 1024 | 27.0 ms — 80 GFLOP/s | 11.7 ms — 185 GFLOP/s |
+| `attn_out` | 404 × 1024 × 1024 | 10.4 ms — 82 GFLOP/s | 4.9 ms — 174 GFLOP/s |
+
+Reproduce any of it:
+
+```bash
+# End to end, with per-stage timings, allocation totals and a sampling profile
+dotnet run --project src/Laya.Cli -c Release -- profile \
+    --model-dir artifacts/models/english --preset triage --text "…" --threads 1
+
+# BenchmarkDotNet: the GEMM shapes, the elementwise kernels, the whole forward pass
+dotnet run --project benchmarks/Laya.Benchmarks -c Release -- --filter '*Gemm*'
+dotnet run --project benchmarks/Laya.Benchmarks -c Release -- --filter '*Forward*'
+```
+
+`laya profile` needs no external tooling: stage timings come from the model itself, and the CPU
+sampling profile and allocation report are captured in-process through
+[`Memory.Introspect`](https://www.nuget.org/packages/Memory.Introspect/).
+
+GPU execution is out of scope for this port.
 
 ---
 
@@ -283,6 +317,7 @@ Tests that need weights skip themselves when `artifacts/models/` is empty; point
 .reference/            the original Python package — the behavioural specification
 src/Laya/              the port: numerics, tokenizers, ModernBERT, decision head, runtime
 src/Laya.Cli/          the command line tool
+benchmarks/            BenchmarkDotNet suites for the kernels and the forward pass
 tests/Laya.Tests/      xunit tests, including the PyTorch parity fixtures
 tools/                 Python scripts that produce reference dumps
 ```
