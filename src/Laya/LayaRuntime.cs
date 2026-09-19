@@ -27,6 +27,20 @@ public static class LayaRuntime
             : Math.Min(value, Environment.ProcessorCount);
     }
 
+    /// <summary>
+    /// The precision the projection weights are packed at, for callers that do not pass one
+    /// explicitly. Defaults to <c>$LAYA_QUANTIZATION</c> (<c>none</c> or <c>int8</c>), and to
+    /// <see cref="Quantization.None"/> — the only mode parity is measured against.
+    /// </summary>
+    public static Quantization Quantization { get; set; } = ReadQuantization();
+
+    private static Quantization ReadQuantization()
+        => Environment.GetEnvironmentVariable("LAYA_QUANTIZATION")?.Trim().ToLowerInvariant() switch
+        {
+            "int8" => Quantization.Int8,
+            _ => Quantization.None,
+        };
+
     /// <summary>True when work should run inline on the calling thread.</summary>
     public static bool SingleThreaded => _maxDegreeOfParallelism <= 1;
 
@@ -46,5 +60,8 @@ public static class LayaRuntime
     }
 
     /// <summary>One line describing how the kernels are configured, for benchmarks and bug reports.</summary>
-    public static string Describe() => $"threads={MaxDegreeOfParallelism}/{Environment.ProcessorCount}, {SimdOps.Capabilities}";
+    public static string Describe()
+        => $"threads={MaxDegreeOfParallelism}/{Environment.ProcessorCount}, {SimdOps.Capabilities}, "
+         + $"weights={Quantization.ToString().ToLowerInvariant()}"
+         + (Quantization == Quantization.Int8 ? $" ({PackedInt8Matrix.Kernel})" : string.Empty);
 }

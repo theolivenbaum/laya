@@ -76,6 +76,14 @@ Status key: `[ ]` not started · `[~]` in progress · `[x]` done
 - [x] Attention: keys transposed into SIMD lanes, so neither inner loop ends in a horizontal
       reduction (encoder attention 1.6x; head attention gathered contiguously as well)
 - [x] Measure the machine's actual FMA roof rather than assuming the nominal clock
+- [x] Int8 (W8A8) projections behind `Quantization.Int8`, in the panel layout rather than a ported
+      dot kernel: 1607 -> 627 MiB, 1.66x single-threaded, at a decision-agreement cost that is
+      documented in `CLAUDE.md` and is *not* free. Off by default.
+- [ ] Decide which int8 configuration ships as the recommended one — the conservative
+      (`attn_out`+`mlp_in`) row is the only one whose disagreements are all near-ties, and it gives
+      up most of the speed. Needs a bigger evaluation corpus than the 20 states used so far.
+- [ ] The outlier hold-out costs 19% of the runtime for a plateau; the per-call channel selection
+      and the gather that builds the float correction are both unoptimized.
 - [ ] fp16 or bf16 weight storage to halve the 1.57 GiB resident — needs a vectorized widening
       path, and bf16 alone would breach the parity budget
 - [ ] Parallel scaling is 2.8x on 4 cores against PyTorch's 3.3x; the pass moves ~8.6 GB of
@@ -89,6 +97,8 @@ Status key: `[ ]` not started · `[~]` in progress · `[x]` done
 | Row cache blocking | Worse — evicts the weight panel |
 | 8-vector panels | Much worse — register pressure |
 | Panel grouping to cut activation re-reads | Worse — the group's weights thrash L2 |
+| Clipping int8 activations to k*RMS | Catastrophic — ModernBERT's outliers are load-bearing |
+| Full-range ±127 int8 weights | Worse end to end than ±63, despite half the kernel error |
 
 The GEMM is at 68% of this machine's 151.7 GFLOP/s 512-bit FMA roof, and the same instruction mix
 in isolation reaches ~130. Even a perfect GEMM would leave the forward pass at ~2.7 s, so 2x

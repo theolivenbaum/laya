@@ -10,15 +10,15 @@ internal sealed class ModernBertLayerWeights
 {
     public float[]? AttnNormWeight;           // null on layer 0, where HF uses nn.Identity
     public float[]? AttnNormBias;
-    public required PackedMatrix Wqkv;        // [3 * hidden, hidden]
+    public required IProjection Wqkv;        // [3 * hidden, hidden]
     public float[] WqkvBias = [];
-    public required PackedMatrix AttnWo;      // [hidden, hidden]
+    public required IProjection AttnWo;      // [hidden, hidden]
     public float[] AttnWoBias = [];
     public required float[] MlpNormWeight;
     public float[] MlpNormBias = [];
-    public required PackedMatrix MlpWi;       // [2 * intermediate, hidden]
+    public required IProjection MlpWi;       // [2 * intermediate, hidden]
     public float[] MlpWiBias = [];
-    public required PackedMatrix MlpWo;       // [hidden, intermediate]
+    public required IProjection MlpWo;       // [hidden, intermediate]
     public float[] MlpWoBias = [];
     public required AttentionKind Kind;
 }
@@ -58,8 +58,16 @@ public sealed class ModernBertEncoder
     /// <summary>Bytes the embeddings and repacked projections occupy in managed memory.</summary>
     public long WeightBytes { get; private set; }
 
-    public ModernBertEncoder(ModernBertConfig config, SafetensorsFile weights, string prefix = "encoder.")
+    /// <param name="quantization">
+    /// Precision for the four projections in every layer, which are 87% of this model's weights.
+    /// The norms, the RoPE tables and the token embeddings stay float32 either way: they are small,
+    /// and the embedding table is a gather rather than a GEMM, so quantizing it would buy memory
+    /// without buying any arithmetic.
+    /// </param>
+    public ModernBertEncoder(ModernBertConfig config, SafetensorsFile weights, string prefix = "encoder.",
+        Quantization? quantization = null)
     {
+        var precision = quantization ?? LayaRuntime.Quantization;
         _config = config;
         _tokenEmbeddings = weights.ReadFloat32(prefix + "embeddings.tok_embeddings.weight");
         _embeddingNormWeight = weights.ReadFloat32(prefix + "embeddings.norm.weight");
@@ -76,15 +84,15 @@ public sealed class ModernBertEncoder
                 // Layer 0's attn_norm is nn.Identity in HF, so the checkpoint has no tensor for it.
                 AttnNormWeight = weights.Contains(p + "attn_norm.weight") ? weights.ReadFloat32(p + "attn_norm.weight") : null,
                 AttnNormBias = weights.Contains(p + "attn_norm.bias") ? weights.ReadFloat32(p + "attn_norm.bias") : null,
-                Wqkv = Pack(weights, p + "attn.Wqkv.weight", 3 * config.HiddenSize, config.HiddenSize),
+                Wqkv = Pack(weights, p + "attn.Wqkv.weight", 3 * config.HiddenSize, config.HiddenSize, At("qkv", precision)),
                 WqkvBias = Optional(weights, p + "attn.Wqkv.bias"),
-                AttnWo = Pack(weights, p + "attn.Wo.weight", config.HiddenSize, config.HiddenSize),
+                AttnWo = Pack(weights, p + "attn.Wo.weight", config.HiddenSize, config.HiddenSize, At("attn_out", precision)),
                 AttnWoBias = Optional(weights, p + "attn.Wo.bias"),
                 MlpNormWeight = weights.ReadFloat32(p + "mlp_norm.weight"),
                 MlpNormBias = Optional(weights, p + "mlp_norm.bias"),
-                MlpWi = Pack(weights, p + "mlp.Wi.weight", 2 * config.IntermediateSize, config.HiddenSize),
+                MlpWi = Pack(weights, p + "mlp.Wi.weight", 2 * config.IntermediateSize, config.HiddenSize, At("mlp_in", precision)),
                 MlpWiBias = Optional(weights, p + "mlp.Wi.bias"),
-                MlpWo = Pack(weights, p + "mlp.Wo.weight", config.HiddenSize, config.IntermediateSize),
+                MlpWo = Pack(weights, p + "mlp.Wo.weight", config.HiddenSize, config.IntermediateSize, At("mlp_out", precision)),
                 MlpWoBias = Optional(weights, p + "mlp.Wo.bias"),
                 Kind = config.LayerKinds.Length > i
                     ? config.LayerKinds[i]
@@ -103,9 +111,31 @@ public sealed class ModernBertEncoder
     private static float[] Optional(SafetensorsFile weights, string name)
         => weights.Contains(name) ? weights.ReadFloat32(name) : [];
 
-    /// <summary>Reads a <c>[out, in]</c> weight and repacks it for the broadcast GEMM kernel.</summary>
-    internal static PackedMatrix Pack(SafetensorsFile weights, string name, int outFeatures, int inFeatures)
-        => new(weights.ReadFloat32(name), outFeatures, inFeatures);
+    /// <summary>Reads a <c>[out, in]</c> weight and repacks it for the GEMM kernel that will run it.</summary>
+    internal static IProjection Pack(SafetensorsFile weights, string name, int outFeatures, int inFeatures,
+        Quantization quantization)
+        => IProjection.Create(weights.ReadFloat32(name), outFeatures, inFeatures, quantization);
+
+    /// <summary>
+    /// Which of the four projections a quantization applies to. The four sites see very different
+    /// activations — two read a LayerNorm's output, one reads attention, one reads a GeGLU — so
+    /// which of them can afford 8-bit inputs is a question to measure, not to assume. Set
+    /// <c>LAYA_INT8_SITES</c> to a comma-separated subset of <c>qkv,attn_out,mlp_in,mlp_out</c>;
+    /// the default is all four.
+    /// </summary>
+    private static readonly HashSet<string> QuantizedSites = ReadSites();
+
+    private static HashSet<string> ReadSites()
+    {
+        string? configured = Environment.GetEnvironmentVariable("LAYA_INT8_SITES");
+        return string.IsNullOrWhiteSpace(configured)
+            ? ["qkv", "attn_out", "mlp_in", "mlp_out"]
+            : [.. configured.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+                  .Select(s => s.ToLowerInvariant())];
+    }
+
+    private static Quantization At(string site, Quantization quantization)
+        => QuantizedSites.Contains(site) ? quantization : Quantization.None;
 
     /// <summary>Runs the encoder over one sequence.</summary>
     public float[] Forward(ReadOnlySpan<int> tokenIds, IStateRecorder? recorder = null)
@@ -162,15 +192,19 @@ public sealed class ModernBertEncoder
                 }
             }
 
+            if (QuantStats.Enabled) QuantStats.Observe("encoder.qkv (post-norm)", normed.AsSpan(0, tokens * hidden), tokens, hidden);
             using (ForwardTiming.Measure("encoder.qkv")) layer.Wqkv.Multiply(normed.AsSpan(0, tokens * hidden), tokens, layer.WqkvBias, qkv);
             using (ForwardTiming.Measure("encoder.attention")) Attention(qkv, segments, layer.Kind, attention, units);
+            if (QuantStats.Enabled) QuantStats.Observe("encoder.attn_out (attn)", attention.AsSpan(0, tokens * hidden), tokens, hidden);
             using (ForwardTiming.Measure("encoder.attn_out")) layer.AttnWo.Multiply(attention.AsSpan(0, tokens * hidden), tokens, layer.AttnWoBias, projected);
             using (ForwardTiming.Measure("encoder.residual")) SimdOps.Add(hiddenStates.AsSpan(0, tokens * hidden), projected.AsSpan(0, tokens * hidden));
             recorder?.Record($"encoder.layers.{layerIndex}.attn_residual", hiddenStates, segments, hidden);
 
             using (ForwardTiming.Measure("encoder.norm")) NormalizeInto(hiddenStates, normed, tokens, hidden, layer.MlpNormWeight, layer.MlpNormBias);
+            if (QuantStats.Enabled) QuantStats.Observe("encoder.mlp_in (post-norm)", normed.AsSpan(0, tokens * hidden), tokens, hidden);
             using (ForwardTiming.Measure("encoder.mlp_in")) layer.MlpWi.Multiply(normed.AsSpan(0, tokens * hidden), tokens, layer.MlpWiBias, mlpHidden);
             using (ForwardTiming.Measure("encoder.geglu")) GeGlu(mlpHidden, tokens, intermediate, activated);
+            if (QuantStats.Enabled) QuantStats.Observe("encoder.mlp_out (geglu)", activated.AsSpan(0, tokens * intermediate), tokens, intermediate);
             using (ForwardTiming.Measure("encoder.mlp_out")) layer.MlpWo.Multiply(activated.AsSpan(0, tokens * intermediate), tokens, layer.MlpWoBias, projected);
             using (ForwardTiming.Measure("encoder.residual")) SimdOps.Add(hiddenStates.AsSpan(0, tokens * hidden), projected.AsSpan(0, tokens * hidden));
             recorder?.Record($"encoder.layers.{layerIndex}.output", hiddenStates, segments, hidden);

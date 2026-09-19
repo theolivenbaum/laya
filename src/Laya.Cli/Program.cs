@@ -132,6 +132,7 @@ internal static class Program
         stopwatch.Stop();
 
         Console.WriteLine(JsonSerializer.Serialize(ToPayload(result), Json));
+        if (Laya.Numerics.QuantStats.Enabled) Laya.Numerics.QuantStats.Report(Console.Error);
         Console.Error.WriteLine(string.Format(CultureInfo.InvariantCulture,
             "{0} question(s), {1} input tokens, {2:F0} ms", questions.Count, result.Usage.InputTokens,
             stopwatch.Elapsed.TotalMilliseconds));

@@ -28,7 +28,7 @@ namespace Laya.Numerics;
 /// changing that switch would widen every other loop in the process as well. The panel width
 /// follows whichever path is chosen, so the packing and the kernel always agree.</para>
 /// </summary>
-public sealed class PackedMatrix
+public sealed class PackedMatrix : IProjection
 {
     private const int RowBlock = 4;
 

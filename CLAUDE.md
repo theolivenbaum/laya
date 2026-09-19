@@ -155,6 +155,82 @@ measured and **rejected**, so do not re-derive them from first principles:
 
 One panel resident in L2, streamed against every row, is the structure that wins.
 
+## Int8 quantization
+
+`Quantization.Int8` packs the four encoder projections as 8-bit per-output-channel symmetric weights
+against per-row dynamically quantized activations (W8A8). It is **opt-in and off by default** —
+parity is measured against fp32 and nothing here changes that. Select it with
+`LAYA_QUANTIZATION=int8`, or by passing a `Quantization` to `DecisionModel`/`ModernBertEncoder`.
+
+`PackedInt8Matrix` keeps `PackedMatrix`'s panel layout rather than adopting the usual
+`[out, in]` int8 dot kernel: the reduction steps are interleaved four to a 32-bit lane
+(`[panel][k/4][column][k%4]`), so one dword broadcast of four activations feeds a `vpdpbusd`-shaped
+dot, each lane still owns one output column, and the loop still ends in a store. The 6x4 register
+tile is unchanged. Porting a dot-product kernel instead would re-introduce exactly the layout that
+measured 3x slower than naive here.
+
+The head stays fp32 (`LAYA_QUANTIZE_HEAD=1` to measure that choice), as do the norms and the token
+embeddings.
+
+### What it costs and what it buys — measured, english checkpoint, 4-core Xeon
+
+This machine reports the `avx512_vnni` CPUID flag but .NET 10 exposes no standalone `Avx512Vnni`,
+and neither `AvxVnni` nor `AvxVnniInt8`, so it runs the **worst** of the three int8 paths
+(`vpmaddubsw` + `vpmaddwd`). Hosts with a real int8-VNNI instruction should do better on time; the
+memory and accuracy numbers are hardware-independent.
+
+Quality is measured as agreement with fp32 over 480 answers (5 presets x 20 states) — choice flips
+and total-variation distance between the option distributions, because a decision engine's output is
+an answer and a calibrated probability, not a tensor.
+
+| config | packed weights | 1 thread | 4 threads | choice flips | option TV | worst flip margin |
+|---|---|---|---|---|---|---|
+| fp32 | 1607 MiB | 4331 ms | 1126 ms | — | — | — |
+| int8, all four sites | 627 MiB | **2608 ms** | **785 ms** | 5 / 80 | 0.077 | 0.210 |
+| int8, all four, 8 channels held | 627 MiB | 3095 ms | 979 ms | 3 / 80 | 0.059 | 0.156 |
+| int8, `attn_out`+`mlp_in`, 8 held | 1094 MiB | 3619 ms | 1052 ms | 3 / 80 | **0.029** | **0.033** |
+
+Only the last row keeps every disagreement inside a near-tie the fp32 model was already indifferent
+about. The other two change answers the fp32 model was reasonably confident of. Which row is
+acceptable is a product decision, not a numerical one, so nothing picks it for you.
+
+### Where the error comes from
+
+Per-site isolation (quantize one projection, leave the other three in fp32) splits cleanly:
+
+| site | its input | choice flips alone |
+|---|---|---|
+| `attn_out` | attention output | 0 |
+| `mlp_in` | post-LayerNorm | 0 |
+| `qkv` | post-LayerNorm | 3 |
+| `mlp_out` | GeGLU output | 4 |
+
+`qkv` hurts despite a well-behaved input because its output goes through a softmax, which amplifies
+the noise. `mlp_out` hurts because the GeGLU output is the one genuinely heavy-tailed input:
+`amax/rms` 16 on average against 6-11 elsewhere, with 22% of values rounding to zero.
+
+**The activations are the whole story, not the weights.** Full-range +-127 weights halve the
+kernel's relative error (0.0055 against 0.0089) and measure *worse* end to end (7 flips against 5).
+So the `vpmaddubsw` path's reduced +-63 weight range, which buys it five uops per 64 products, is
+free. Use `LAYA_INT8_KERNEL=widen` to reproduce that.
+
+`LAYA_QSTATS=1` prints the per-projection activation statistics these conclusions came from.
+
+### Measured and rejected (do not re-derive)
+
+| idea | result |
+|---|---|
+| Clip the activation range to k*RMS before quantizing | **Catastrophic**: 86% of answers change at 3 sigma, 49% at 8 sigma. ModernBERT's outliers are massive activations that act as attention biases — the tail is load-bearing, and amax scaling preserving it exactly is correct. |
+| SmoothQuant-style rescaling folded into the preceding LayerNorm | Not needed. The residual stream reaches the tens of thousands, but no projection ever sees it: every one reads a LayerNorm, attention, or GeGLU output, and those sit at `amax/rms` 6-16. |
+| Hold the largest input channels out in fp32 (LLM.int8-style) | Helps and then plateaus: 5 flips to 3, TV 0.077 to 0.059, at 19% of the runtime. Worth it for the TV distance, not a fix. |
+| Full-range +-127 weights instead of +-63 | Worse end to end despite half the kernel error. |
+| Porting Harrier's `[out, in]` dot kernel directly | Not attempted on purpose — it is the layout `PackedMatrix` exists to avoid. |
+
+Its outliers *are* channel-concentrated where it matters (at `Wqkv`, 68 channels are ever a row's
+largest and eight cover 96.8%, channel 379 alone at 67%), which is why holding them out helps at
+all. The float correction is built by dequantizing the packed int8 weights rather than keeping a
+second float copy — the weights were never the error source, so there is nothing to preserve.
+
 ## Build & test
 
 ```bash
@@ -213,6 +289,11 @@ model; parity tests are skipped when `artifacts/` is empty.
 - Attention's inner loops must not end in a horizontal reduction. Gather the keys **transposed** so
   adjacent keys occupy adjacent lanes; a score vector then finishes with a store rather than a
   shuffle chain. Worth 1.6x on the encoder's attention.
+- An int8 helper ported from another codebase is only correct in that codebase's layout. Harrier's
+  widen-and-`vpmaddwd` fallback splits the vector into low and high halves, which is fine when the
+  tile ends in a horizontal sum and wrong here, where lane *m* must own bytes `4m..4m+3`. It
+  measured a relative error of 2.7 — the kernel was not approximately right, it was computing a
+  different product. Deinterleave within the dword instead.
 - `ForwardTiming.Stage` is idempotent for a reason: `using var stage = …` plus an explicit
   `stage.Dispose()` recorded the stage twice, the second time spanning to the end of the enclosing
   method. It made one stage look six times more expensive than it was and sent me optimizing the

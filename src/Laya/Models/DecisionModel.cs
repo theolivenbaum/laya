@@ -46,9 +46,21 @@ public sealed class DecisionModel
 
     public ModernBertEncoder Encoder => _encoder;
 
-    public DecisionModel(ModernBertConfig encoderConfig, LayaConfig config, SafetensorsFile weights)
+    /// <param name="quantization">
+    /// Precision for the encoder's projections. The head's own projections stay float32 regardless:
+    /// they are a fifteenth of the encoder's weights, and they are where the option logits and the
+    /// four calibration features that drive <c>act_head</c> are decided, so 8-bit noise there is
+    /// bought at a far worse exchange rate than in the encoder. Override with
+    /// <c>LAYA_QUANTIZE_HEAD=1</c> to measure that claim rather than assume it.
+    /// </param>
+    public DecisionModel(ModernBertConfig encoderConfig, LayaConfig config, SafetensorsFile weights,
+        Quantization? quantization = null)
     {
-        _encoder = new ModernBertEncoder(encoderConfig, weights);
+        var precision = quantization ?? LayaRuntime.Quantization;
+        var headPrecision = Environment.GetEnvironmentVariable("LAYA_QUANTIZE_HEAD") == "1"
+            ? precision
+            : Quantization.None;
+        _encoder = new ModernBertEncoder(encoderConfig, weights, quantization: precision);
         _hidden = encoderConfig.HiddenSize;
 
         _typeEmbedding = weights.ReadFloat32("type_emb.weight");
@@ -63,13 +75,13 @@ public sealed class DecisionModel
                 Norm1Bias = weights.ReadFloat32(p + "norm1.bias"),
                 Norm2Weight = weights.ReadFloat32(p + "norm2.weight"),
                 Norm2Bias = weights.ReadFloat32(p + "norm2.bias"),
-                InProjWeight = ModernBertEncoder.Pack(weights, p + "self_attn.in_proj_weight", 3 * _hidden, _hidden),
+                InProjWeight = ModernBertEncoder.Pack(weights, p + "self_attn.in_proj_weight", 3 * _hidden, _hidden, headPrecision),
                 InProjBias = weights.ReadFloat32(p + "self_attn.in_proj_bias"),
-                OutProjWeight = ModernBertEncoder.Pack(weights, p + "self_attn.out_proj.weight", _hidden, _hidden),
+                OutProjWeight = ModernBertEncoder.Pack(weights, p + "self_attn.out_proj.weight", _hidden, _hidden, headPrecision),
                 OutProjBias = weights.ReadFloat32(p + "self_attn.out_proj.bias"),
-                Linear1Weight = ModernBertEncoder.Pack(weights, p + "linear1.weight", 4 * _hidden, _hidden),
+                Linear1Weight = ModernBertEncoder.Pack(weights, p + "linear1.weight", 4 * _hidden, _hidden, headPrecision),
                 Linear1Bias = weights.ReadFloat32(p + "linear1.bias"),
-                Linear2Weight = ModernBertEncoder.Pack(weights, p + "linear2.weight", _hidden, 4 * _hidden),
+                Linear2Weight = ModernBertEncoder.Pack(weights, p + "linear2.weight", _hidden, 4 * _hidden, headPrecision),
                 Linear2Bias = weights.ReadFloat32(p + "linear2.bias"),
             };
         }
@@ -367,13 +379,13 @@ public sealed class DecisionModel
         public required float[] Norm1Bias;
         public required float[] Norm2Weight;
         public required float[] Norm2Bias;
-        public required PackedMatrix InProjWeight;
+        public required IProjection InProjWeight;
         public required float[] InProjBias;
-        public required PackedMatrix OutProjWeight;
+        public required IProjection OutProjWeight;
         public required float[] OutProjBias;
-        public required PackedMatrix Linear1Weight;
+        public required IProjection Linear1Weight;
         public required float[] Linear1Bias;
-        public required PackedMatrix Linear2Weight;
+        public required IProjection Linear2Weight;
         public required float[] Linear2Bias;
     }
 }

@@ -274,6 +274,26 @@ arithmetic, which this port deliberately does not do because parity is measured 
 | `mlp_out` | 404 × 2624 × 1024 | 25.5 ms — 85 GFLOP/s | 11.7 ms — 185 GFLOP/s |
 | `attn_out` | 404 × 1024 × 1024 | 10.4 ms — 82 GFLOP/s | 4.9 ms — 174 GFLOP/s |
 
+#### Int8
+
+The four encoder projections can be packed as 8-bit weights against dynamically quantized
+activations. It is off by default — parity is measured against fp32 — and switched on with
+`LAYA_QUANTIZATION=int8` or a `Quantization` argument to the model.
+
+| | packed weights | 1 thread | 4 threads | answers changed | option TV distance |
+|---|---|---|---|---|---|
+| fp32 | 1607 MiB | 4.33 s | 1.13 s | — | — |
+| int8 | 627 MiB | **2.61 s** | **0.79 s** | 5 / 80 | 0.077 |
+| int8, conservative¹ | 1094 MiB | 3.62 s | 1.05 s | 3 / 80 | 0.029 |
+
+¹ `LAYA_INT8_SITES=attn_out,mlp_in LAYA_INT8_OUTLIERS=8`, the only configuration measured whose
+disagreements are all cases the fp32 model was itself within 0.03 of calling either way.
+
+This is a real trade, not a free win: int8 changes some answers, and on a calibrated decision engine
+the probabilities move too. `CLAUDE.md` has the per-projection breakdown, what was measured and
+rejected (clipping the activation range destroys the model), and the caveat that the timings above
+come from a CPU with no usable int8-VNNI instruction and are the pessimistic case.
+
 Reproduce any of it:
 
 ```bash

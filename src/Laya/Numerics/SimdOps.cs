@@ -190,6 +190,78 @@ public static class SimdOps
         return sum;
     }
 
+    /// <summary>
+    /// Accumulates the elementwise maximum of <c>|values|</c> into <paramref name="magnitude"/>.
+    /// Used to find which input channels carry this batch's outliers, which is a pass over the whole
+    /// activation matrix and so wants to be vectorized.
+    /// </summary>
+    public static void MaxMagnitudeInto(ReadOnlySpan<float> values, Span<float> magnitude)
+    {
+        int width = Vector<float>.Count;
+        int i = 0;
+        for (; i <= values.Length - width; i += width)
+        {
+            var current = Vector.LoadUnsafe(in magnitude[i]);
+            Vector.Max(current, Vector.Abs(Vector.LoadUnsafe(in values[i]))).StoreUnsafe(ref magnitude[i]);
+        }
+        for (; i < values.Length; ++i) magnitude[i] = MathF.Max(magnitude[i], MathF.Abs(values[i]));
+    }
+
+    /// <summary>
+    /// Largest absolute value and mean square of a span, in one pass. A dynamic int8 quantization
+    /// wants both — the first to know where the range ends, the second to know where the values
+    /// actually are — and reading the row twice to get them would cost more than the arithmetic.
+    /// </summary>
+    public static (float MaxMagnitude, float MeanSquare) Spread(ReadOnlySpan<float> values)
+    {
+        if (values.Length == 0) return (0f, 0f);
+        int width = Vector<float>.Count;
+        int i = 0;
+        float best = 0f;
+        double sumOfSquares = 0;
+        if (values.Length >= width)
+        {
+            var magnitude = Vector<float>.Zero;
+            var squares = Vector<float>.Zero;
+            for (; i <= values.Length - width; i += width)
+            {
+                var v = Vector.LoadUnsafe(in values[i]);
+                magnitude = Vector.Max(magnitude, Vector.Abs(v));
+                squares = Vector.FusedMultiplyAdd(v, v, squares);
+            }
+            for (int lane = 0; lane < width; ++lane) best = MathF.Max(best, magnitude[lane]);
+            sumOfSquares = Vector.Sum(squares);
+        }
+        for (; i < values.Length; ++i)
+        {
+            best = MathF.Max(best, MathF.Abs(values[i]));
+            sumOfSquares += (double)values[i] * values[i];
+        }
+        return (best, (float)(sumOfSquares / values.Length));
+    }
+
+    /// <summary>
+    /// Largest absolute value in a span; 0 when empty. This is the scale of a dynamic int8
+    /// quantization, so it runs once per token row per projection and is worth vectorizing.
+    /// </summary>
+    public static float MaxMagnitude(ReadOnlySpan<float> values)
+    {
+        int width = Vector<float>.Count;
+        int i = 0;
+        float best = 0f;
+        if (values.Length >= width)
+        {
+            var acc = Vector.Abs(Vector.LoadUnsafe(in values[0]));
+            for (i = width; i <= values.Length - width; i += width)
+            {
+                acc = Vector.Max(acc, Vector.Abs(Vector.LoadUnsafe(in values[i])));
+            }
+            for (int lane = 0; lane < width; ++lane) best = MathF.Max(best, acc[lane]);
+        }
+        for (; i < values.Length; ++i) best = MathF.Max(best, MathF.Abs(values[i]));
+        return best;
+    }
+
     /// <summary>Largest value in a span; returns <see cref="float.NegativeInfinity"/> when empty.</summary>
     public static float Max(ReadOnlySpan<float> values)
     {
