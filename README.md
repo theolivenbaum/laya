@@ -364,10 +364,10 @@ traps that cost the most time. [`TODO.md`](TODO.md) tracks what is done and what
 
 ## Publishing
 
-[`.github/workflows/nuget.yml`](.github/workflows/nuget.yml) builds, tests and packs the package
-on every push to `main` and publishes it to nuget.org with a CalVer version (`yy.M.<run
-number>`). Pull requests run the same job without the publish step. The only setup it needs is a
-nuget.org API key in the `NUGET_API_KEY` repository secret.
+[`.devops/azure-pipelines.yml`](.devops/azure-pipelines.yml) builds and packs the package on
+every push to `main` and pushes it to nuget.org with a CalVer version (`yy.M.<build id>`), using
+the `nuget-curiosity-org` service connection — the same shape as the pipeline in
+`sentence-transformers-sharp`.
 
 No model data is packaged: the checkpoints live on <https://models.curiosity.ai/laya/>, laid out
 as `<checkpoint>/<revision>/<file>` — the English checkpoint at the root, the other two under

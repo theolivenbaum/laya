@@ -24,8 +24,9 @@ artifacts/             (gitignored) downloaded models and reference dumps
 
 ## Packaging
 
-One package, `Laya`, published on every push to `main` with a CalVer version
-(`.github/workflows/nuget.yml`). **No model data is packaged.** `RemoteCheckpoint` downloads a
+One package, `Laya`, published on every push to `main` with a CalVer version by the Azure
+DevOps pipeline in `.devops/azure-pipelines.yml` (`GeneratePackageOnBuild`, then
+`NuGetCommand@2` push through the `nuget-curiosity-org` service connection). **No model data is packaged.** `RemoteCheckpoint` downloads a
 checkpoint's five files on demand from `https://models.curiosity.ai/laya/`, laid out as
 `<checkpoint>/<revision>/<file>` — English at the root, the other two under `multilingual/` and
 `typed-decisions/`, revision `main` — into `<cache>/models.curiosity.ai/<name>/<revision>/`, which
