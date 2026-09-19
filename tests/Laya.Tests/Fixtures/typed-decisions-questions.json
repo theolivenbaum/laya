@@ -1,0 +1,5 @@
+{"urgency": {"type": "score", "instructions": "How urgent is this incident?", "criteria": ["routine", "elevated", "critical"]},
+ "severity": {"type": "choice", "instructions": "How severe is the incident?", "criteria": {"low": "no impact", "medium": "partial impact", "high": "outage"}},
+ "true_positive": {"type": "noul", "instructions": "Is this a real security incident rather than a false alarm?"},
+ "credential_compromise": {"type": "noul", "instructions": "Were credentials compromised?"},
+ "disposition": {"type": "choice", "instructions": "What should happen next?", "criteria": {"close": null, "escalate": null, "monitor": null}}}
