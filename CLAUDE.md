@@ -178,6 +178,10 @@ model; parity tests are skipped when `artifacts/` is empty.
 - `logits.masked_fill(~marker_mask, -1e4)` uses `-1e4`, not `-inf`; it changes the softmax.
 - Temperature is looked up by `"<type>:<bucket>"` (`2`, `3-5`, `6-10`, `11+`) first, then
   falls back to `temperature[qtype]`.
+- `guess_latin_language` abstains on short input by design: fewer than 4 words returns null, and a
+  non-English language must beat English by a margin. So a five-word German sentence routes to
+  **english**, which looks like a routing bug and is not one — the Python does the same. Use a long
+  sample when demonstrating routing, or an explicitly non-Latin script.
 - The multilingual checkpoint's `position_embedding_type: "sans_pos"` is **not** honoured by
   transformers — its ModernBERT reads no such key and always applies RoPE. Honouring it diverges at
   layer 0.

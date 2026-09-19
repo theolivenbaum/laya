@@ -106,9 +106,10 @@ language second, and sends each request to a checkpoint that can read it:
 ```csharp
 using var router = new Router(maxLoaded: 2);
 
-router.Predict("I was charged twice",                 Presets.Triage());  // -> english
-router.Predict("Mein Konto wurde zweimal belastet",   Presets.Triage());  // -> multilingual
-router.Predict("請求書4411で二重に請求されました",         Presets.Triage());  // -> multilingual
+router.Predict("I was charged twice", Presets.Triage());                  // -> english
+router.Predict("請求書4411で二重に請求されました", Presets.Triage());           // -> multilingual
+router.Predict("Mir wurde meine Rechnung letzten Monat zweimal abgebucht " +
+               "und der Support hat nicht geantwortet", Presets.Triage());  // -> multilingual
 
 // Routing on its own loads nothing and costs microseconds.
 var decision = router.Route("मुझसे दो बार शुल्क लिया गया", Presets.Triage());
@@ -118,6 +119,12 @@ Console.WriteLine(decision.Reason);
 
 A cold load costs seconds while detection costs microseconds, so a server that alternates languages
 should `Preload()` rather than let the LRU evict on every request.
+
+Note the asymmetry: script detection is exact, so *any* amount of non-Latin text routes correctly,
+but the Latin-script language guess is a stopword heuristic that deliberately abstains on short
+inputs. `"Mein Konto wurde zweimal belastet"` routes to **english** — five words is not enough
+evidence to overrule the default, and guessing wrong on ordinary English would be worse. Pass
+`lang:` or `model:` when you already know.
 
 ### Presets
 

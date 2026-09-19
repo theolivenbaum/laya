@@ -95,7 +95,7 @@ internal static class Program
           laya download --repo convaiinnovations/laya-typed-decisions
           laya predict --model-dir ./artifacts/models/english --preset triage \
                        --text "I was charged twice and nobody answers"
-          laya route --text "Mein Konto wurde zweimal belastet"
+          laya route --text "請求書4411で二重に請求されました"
           laya profile --model-dir ./artifacts/models/english --preset triage \
                        --text "…" --threads 1 --no-trace
           laya dump-states --model-dir ./artifacts/models/english \
