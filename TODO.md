@@ -71,12 +71,28 @@ Status key: `[ ]` not started · `[~]` in progress · `[x]` done
 - [x] Pooled scratch buffers: 144 MiB -> 1.8 MiB allocated per call, zero GC collections
 - [x] Tune the register block: 6 token rows per pass, measured against 4/8/10/12
 - [x] Release the safetensors mapping after load (-0.8 GiB working set)
-- [ ] Cache blocking over the reduction dimension — the GEMM is at ~50% of this machine's
-      single-core AVX-512 roof, and the rest looks like 512-bit downclocking plus L2 bandwidth
-- [ ] Attention: keys in SIMD lanes instead of a dot product per query-key pair, to remove the
-      horizontal reductions (attention is ~19% of a pass)
+- [x] Widen the register tile to 6 rows x 4 output vectors (84 -> 101 GFLOP/s), with the broadcast
+      on a single reused temp
+- [x] Attention: keys transposed into SIMD lanes, so neither inner loop ends in a horizontal
+      reduction (encoder attention 1.6x; head attention gathered contiguously as well)
+- [x] Measure the machine's actual FMA roof rather than assuming the nominal clock
 - [ ] fp16 or bf16 weight storage to halve the 1.57 GiB resident — needs a vectorized widening
       path, and bf16 alone would breach the parity budget
+- [ ] Parallel scaling is 2.8x on 4 cores against PyTorch's 3.3x; the pass moves ~8.6 GB of
+      activation re-reads and looks bandwidth-bound at 4 threads
+
+### Measured and rejected (do not re-derive)
+
+| idea | result |
+|---|---|
+| Pad the activation row stride against L1 set aliasing | +5% |
+| Row cache blocking | Worse — evicts the weight panel |
+| 8-vector panels | Much worse — register pressure |
+| Panel grouping to cut activation re-reads | Worse — the group's weights thrash L2 |
+
+The GEMM is at 68% of this machine's 151.7 GFLOP/s 512-bit FMA roof, and the same instruction mix
+in isolation reaches ~130. Even a perfect GEMM would leave the forward pass at ~2.7 s, so 2x
+against PyTorch is not reachable in fp32 on this hardware.
 
 ## Known gaps / deliberate deviations
 - The multilingual checkpoint's `encoder/config.json` says `position_embedding_type: "sans_pos"`.

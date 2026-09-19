@@ -262,9 +262,10 @@ public sealed class DecisionModel
             for (int head = 0; head < heads; ++head) units[unitIndex++] = (segment, head);
         }
 
-        using var attentionStage = ForwardTiming.Measure("head.attention");
-        HeadAttention(qkv, context, segments, units, hidden, headDim, scale);
-        attentionStage.Dispose();
+        using (ForwardTiming.Measure("head.attention"))
+        {
+            HeadAttention(qkv, context, segments, units, hidden, headDim, scale);
+        }
 
         var projected = scratch.Rent(tokens * hidden);
         using (ForwardTiming.Measure("head.attn_out"))
@@ -300,8 +301,14 @@ public sealed class DecisionModel
     }
 
     /// <summary>
-    /// Full attention inside each question's own sequence, on pointers for the same reason the
-    /// encoder's is: the head dimension is 64 floats, so per-pair span construction dominates.
+    /// Full attention inside each question's own sequence.
+    ///
+    /// <para>Same shape as the encoder's, and gathered the same way for the same reason: read
+    /// straight out of the packed QKV buffer, consecutive keys for one head are 12 KiB apart, so
+    /// every step of the reduction touches a different page. Copying the head's query, key and
+    /// value into contiguous scratch — the keys transposed, so
+    /// <see cref="AttentionKernels"/> can keep them in lanes — made this layer seven times
+    /// faster.</para>
     /// </summary>
     private static unsafe void HeadAttention(float[] qkv, float[] context, IReadOnlyList<Segment> segments,
         (Segment Segment, int Head)[] units, int hidden, int headDim, float scale)
@@ -311,32 +318,39 @@ public sealed class DecisionModel
         {
             var (segment, head) = units[unit];
             int length = segment.Length;
-            float[] rented = ArrayPool<float>.Shared.Rent(length);
+            int keyStride = AttentionKernels.PaddedKeyStride(length);
+            int queryFloats = length * headDim;
+            int keyFloats = headDim * keyStride;
+
+            float[] rented = ArrayPool<float>.Shared.Rent(2 * queryFloats + keyFloats + keyStride);
             try
             {
-                fixed (float* source = qkv, output = context, scores = rented)
+                fixed (float* source = qkv, output = context, scratch = rented)
                 {
-                    float* keys = source + (long)segment.Start * stride + hidden + head * headDim;
-                    float* values = source + (long)segment.Start * stride + 2 * hidden + head * headDim;
+                    float* query = scratch;
+                    float* keysTransposed = query + queryFloats;
+                    float* values = keysTransposed + keyFloats;
+                    float* scores = values + queryFloats;
+
+                    new Span<float>(keysTransposed, keyFloats).Clear();
 
                     for (int t = 0; t < length; ++t)
                     {
-                        float* query = source + (long)(segment.Start + t) * stride + head * headDim;
-                        float* k = keys;
-                        for (int j = 0; j < length; ++j, k += stride)
-                        {
-                            scores[j] = SimdOps.Dot(query, k, headDim) * scale;
-                        }
-                        SimdOps.Softmax(new Span<float>(scores, length));
+                        float* row = source + (long)(segment.Start + t) * stride + head * headDim;
+                        Buffer.MemoryCopy(row, query + t * headDim, headDim * 4, headDim * 4);
+                        Buffer.MemoryCopy(row + 2 * hidden, values + t * headDim, headDim * 4, headDim * 4);
 
-                        float* destination = output + (long)(segment.Start + t) * hidden + head * headDim;
-                        new Span<float>(destination, headDim).Clear();
-                        float* v = values;
-                        for (int j = 0; j < length; ++j, v += stride)
-                        {
-                            float weight = scores[j];
-                            if (weight != 0f) SimdOps.AddScaled(destination, v, headDim, weight);
-                        }
+                        float* k = row + hidden;
+                        for (int d = 0; d < headDim; ++d) keysTransposed[d * keyStride + t] = k[d];
+                    }
+
+                    for (int t = 0; t < length; ++t)
+                    {
+                        AttentionKernels.Scores(query + t * headDim, keysTransposed, keyStride, headDim,
+                            length, scale, scores);
+                        SimdOps.Softmax(new Span<float>(scores, length));
+                        AttentionKernels.WeightedSum(values, scores, length, headDim,
+                            output + (long)(segment.Start + t) * hidden + head * headDim);
                     }
                 }
             }

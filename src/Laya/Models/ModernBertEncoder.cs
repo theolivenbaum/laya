@@ -214,11 +214,12 @@ public sealed class ModernBertEncoder
     /// call for every (segment, head) pair, and allocating the rotated query and key per unit was
     /// costing well over a hundred megabytes of garbage per forward pass.</para>
     ///
-    /// <para>The inner loops work on pointers. A head is 64 floats, so a score is eight vector
-    /// operations, and re-deriving a bounds-checked span for each of the ~14 million
-    /// query-key pairs in a forward pass costs more than the arithmetic it guards. The values are
-    /// also gathered into a contiguous block first, because they are otherwise strided by the
-    /// packed QKV layout and every accumulation step would touch a different cache line.</para>
+    /// <para>The query, key and value for a head are gathered into contiguous scratch first — they
+    /// are otherwise strided by the packed QKV layout — and the keys are written out
+    /// <em>transposed</em>, so <see cref="AttentionKernels"/> can keep adjacent keys in SIMD lanes
+    /// and never reduce a vector to a scalar. A forward pass has about 14 million query-key pairs;
+    /// a horizontal sum on each of them is the difference between attention being a fifth of the
+    /// time and a twentieth.</para>
     /// </summary>
     private unsafe void Attention(float[] qkv, IReadOnlyList<Segment> segments, AttentionKind kind,
         float[] destination, (Segment Segment, int Head)[] units)
@@ -234,30 +235,42 @@ public sealed class ModernBertEncoder
         {
             var (segment, head) = units[unit];
             int length = segment.Length;
+            int keyStride = AttentionKernels.PaddedKeyStride(length);
             int qBase = head * headDim;
             int kBase = hidden + head * headDim;
             int vBase = 2 * hidden + head * headDim;
 
-            float[] rented = ArrayPool<float>.Shared.Rent(3 * length * headDim + length);
+            // query [length][headDim] | keysT [headDim][keyStride] | values [length][headDim] | scores
+            int queryFloats = length * headDim;
+            int keyFloats = headDim * keyStride;
+            float[] rented = ArrayPool<float>.Shared.Rent(2 * queryFloats + keyFloats + keyStride);
             try
             {
                 fixed (float* source = qkv, output = destination, scratch = rented)
                 {
                     float* query = scratch;
-                    float* key = query + length * headDim;
-                    float* value = key + length * headDim;
-                    float* scores = value + length * headDim;
+                    float* keysTransposed = query + queryFloats;
+                    float* values = keysTransposed + keyFloats;
+                    float* scores = values + queryFloats;
 
+                    // Padding lanes must be zero: they produce scores the softmax never reads, but
+                    // NaNs there would still poison the multiply.
+                    new Span<float>(keysTransposed, keyFloats).Clear();
+
+                    float* rotated = stackalloc float[headDim];
                     for (int t = 0; t < length; ++t)
                     {
                         float* row = source + (long)(segment.Start + t) * stride;
-                        Buffer.MemoryCopy(row + qBase, query + t * headDim, headDim * 4, headDim * 4);
-                        Buffer.MemoryCopy(row + kBase, key + t * headDim, headDim * 4, headDim * 4);
-                        Buffer.MemoryCopy(row + vBase, value + t * headDim, headDim * 4, headDim * 4);
+                        float* q = query + t * headDim;
+                        Buffer.MemoryCopy(row + qBase, q, headDim * 4, headDim * 4);
+                        Buffer.MemoryCopy(row + vBase, values + t * headDim, headDim * 4, headDim * 4);
 
                         // Positions restart at 0 for every sequence, as they do in a padded batch.
-                        rope.Apply(new Span<float>(query + t * headDim, headDim), t);
-                        rope.Apply(new Span<float>(key + t * headDim, headDim), t);
+                        rope.Apply(new Span<float>(q, headDim), t);
+
+                        Buffer.MemoryCopy(row + kBase, rotated, headDim * 4, headDim * 4);
+                        rope.Apply(new Span<float>(rotated, headDim), t);
+                        for (int d = 0; d < headDim; ++d) keysTransposed[d * keyStride + t] = rotated[d];
                     }
 
                     for (int t = 0; t < length; ++t)
@@ -266,22 +279,12 @@ public sealed class ModernBertEncoder
                         int last = window == int.MaxValue ? length - 1 : Math.Min(length - 1, t + window);
                         int count = last - first + 1;
 
-                        float* q = query + t * headDim;
-                        float* k = key + first * headDim;
-                        for (int j = 0; j < count; ++j, k += headDim)
-                        {
-                            scores[j] = SimdOps.Dot(q, k, headDim) * scale;
-                        }
+                        AttentionKernels.Scores(query + t * headDim, keysTransposed + first, keyStride,
+                            headDim, count, scale, scores);
                         SimdOps.Softmax(new Span<float>(scores, count));
 
-                        float* destinationRow = output + (long)(segment.Start + t) * hidden + head * headDim;
-                        new Span<float>(destinationRow, headDim).Clear();
-                        float* v = value + first * headDim;
-                        for (int j = 0; j < count; ++j, v += headDim)
-                        {
-                            float weight = scores[j];
-                            if (weight != 0f) SimdOps.AddScaled(destinationRow, v, headDim, weight);
-                        }
+                        AttentionKernels.WeightedSum(values + (long)first * headDim, scores, count, headDim,
+                            output + (long)(segment.Start + t) * hidden + head * headDim);
                     }
                 }
             }

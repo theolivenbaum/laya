@@ -233,6 +233,11 @@ compared in one pass rather than generated one token at a time.
 - **Scratch is rented, not allocated.** Every buffer a pass needs is the same size every time and
   dies immediately, so they come from the array pool. This is the difference between 144 MiB of
   garbage per call and 1.8 MiB.
+- **Attention keeps the thing being summed in the lanes.** A dot product per query-key pair ends
+  in a horizontal reduction, and a forward pass has ~14 million of those pairs. The keys are
+  gathered transposed, so adjacent keys sit in adjacent lanes and a score vector finishes with a
+  plain store; the value accumulation likewise holds its running total in registers across the
+  whole key loop. See [`AttentionKernels`](src/Laya/Numerics/AttentionKernels.cs).
 
 ### Performance
 
@@ -242,20 +247,31 @@ same machine and the same weights.
 
 | | 1 thread | 4 threads |
 |---|---|---|
-| this port | **4.47 s** | **1.53 s** |
-| PyTorch 2.14 CPU (oneDNN) | 4.15 s | 1.42 s |
-| this port, before the optimization pass | 16.5 s | 4.9 s |
+| this port | **3.63 s** | 1.29 s |
+| PyTorch 2.14 CPU (oneDNN) | 4.10 s | 1.23 s |
+| this port, before any optimization | 16.5 s | 4.9 s |
 
 Per call, in steady state: **1.8 MiB** allocated, **zero** GC collections, **2.0 GiB** working set
 (1.57 GiB of that is the fp32 weights).
 
-The projection kernel, which is ~70% of a forward pass:
+#### Where the time goes, and what is left
+
+The projection kernel is ~76% of a forward pass and runs at **103 GFLOP/s** single-threaded. That
+number only means something against this machine's actual roof, so it was measured: a loop of pure
+register-to-register 512-bit FMAs sustains **151.7 GFLOP/s**, because the core drops to 2.37 GHz
+under AVX-512 (the 256-bit roof is 89.5 GFLOP/s at the full 2.8 GHz). So the GEMM is at 68% of the
+roof, and the same instruction mix in isolation — L1-resident, no panel switching — reaches ~130.
+
+That bounds what is still available. Even a *perfect* GEMM would put the whole pass at ~2.7 s, and
+2x against PyTorch would require the entire forward pass, attention and normalization included, to
+sustain ~96% of the pure-FMA roof. That is not reachable in fp32; it would take lower-precision
+arithmetic, which this port deliberately does not do because parity is measured against fp32.
 
 | projection | shape | 1 thread | 4 threads |
 |---|---|---|---|
-| `mlp_in` | 404 × 1024 × 5248 | 49.5 ms — 88 GFLOP/s | 20.3 ms — 214 GFLOP/s |
-| `qkv` | 404 × 1024 × 3072 | 30.2 ms — 84 GFLOP/s | 13.5 ms — 189 GFLOP/s |
-| `mlp_out` | 404 × 2624 × 1024 | 27.0 ms — 80 GFLOP/s | 11.7 ms — 185 GFLOP/s |
+| `mlp_in` | 404 × 1024 × 5248 | 42.1 ms — 103 GFLOP/s | 20.3 ms — 214 GFLOP/s |
+| `qkv` | 404 × 1024 × 3072 | 24.9 ms — 102 GFLOP/s | 13.5 ms — 189 GFLOP/s |
+| `mlp_out` | 404 × 2624 × 1024 | 25.5 ms — 85 GFLOP/s | 11.7 ms — 185 GFLOP/s |
 | `attn_out` | 404 × 1024 × 1024 | 10.4 ms — 82 GFLOP/s | 4.9 ms — 174 GFLOP/s |
 
 Reproduce any of it:

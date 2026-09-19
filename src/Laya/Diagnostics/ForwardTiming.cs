@@ -88,18 +88,27 @@ public sealed class ForwardTiming
         public void Dispose() => Current = null;
     }
 
-    /// <summary>One timed stage; dispose to record it.</summary>
-    public readonly ref struct Stage
+    /// <summary>
+    /// One timed stage; dispose to record it.
+    ///
+    /// <para>Recording is idempotent. A <c>using var</c> plus an explicit <c>Dispose()</c> is an
+    /// easy thing to write, and it silently recorded the stage twice — the second time spanning
+    /// everything up to the end of the enclosing method, which made one stage look six times more
+    /// expensive than it was.</para>
+    /// </summary>
+    public ref struct Stage
     {
         private readonly ForwardTiming? _timing;
         private readonly string _name;
         private readonly long _timestamp;
         private readonly long _allocated;
+        private bool _recorded;
 
         internal Stage(ForwardTiming? timing, string name)
         {
             _timing = timing;
             _name = name;
+            _recorded = false;
             _timestamp = timing is null ? 0 : Stopwatch.GetTimestamp();
             // Only the calling thread's allocations are attributed; the parallel kernels allocate
             // on worker threads, which is itself worth seeing as a gap between this and the GC's
@@ -109,7 +118,8 @@ public sealed class ForwardTiming
 
         public void Dispose()
         {
-            if (_timing is null) return;
+            if (_timing is null || _recorded) return;
+            _recorded = true;
             _timing.Add(_name, Stopwatch.GetElapsedTime(_timestamp).Ticks,
                 GC.GetAllocatedBytesForCurrentThread() - _allocated);
         }

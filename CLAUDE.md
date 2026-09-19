@@ -133,6 +133,28 @@ theorising:
 DOTNET_JitDisasm="Panel512" DOTNET_TieredCompilation=0 dotnet run -c Release …
 ```
 
+### Know the roof before chasing a number
+
+"X GFLOP/s" means nothing without the machine's actual ceiling, and the nominal clock is not it.
+On the 4-core Xeon this port was tuned on, a loop of pure register-to-register 512-bit FMAs
+sustains **151.7 GFLOP/s** — the core drops to 2.37 GHz under AVX-512, while the 256-bit roof is
+89.5 GFLOP/s at the full 2.8 GHz. Measure that first (a dozen independent FMA chains, no memory),
+then measure the kernel's own instruction mix over an L1-resident buffer. The three numbers —
+roof, mix-in-isolation, real kernel — tell you whether you are fighting the instruction mix, the
+cache, or nothing at all.
+
+The GEMM currently sits at 68% of the roof, with the mix reaching ~130 in isolation. These were
+measured and **rejected**, so do not re-derive them from first principles:
+
+| idea | result |
+|---|---|
+| Pad the activation row stride to break L1 set aliasing | +5% — not the problem |
+| Block the rows so the activations fit L2 | Worse (94 → 80 → 55 as the block shrinks): it evicts the weight panel |
+| Wider panels (8 vectors) to halve activation re-reads | Much worse (52–67): register pressure |
+| Group panels so a row tile serves several | Worse (76 at group 4): the group's weights thrash L2 |
+
+One panel resident in L2, streamed against every row, is the structure that wins.
+
 ## Build & test
 
 ```bash
@@ -183,3 +205,15 @@ model; parity tests are skipped when `artifacts/` is empty.
 - A benchmark of an in-place kernel must restore its input **per invocation**, not per iteration.
   Repeated in-place `Gelu` walks its values down to denormals, and denormal arithmetic traps to
   microcode — the benchmark then reports a kernel forty times slower than it is.
+- The register tile is swept, not reasoned about. Rows × output-vectors on the 404×1024×5248
+  projection: 6×2 = 84 GFLOP/s, 4×4 = 84, 5×4 = 92, **6×4 = 101**, 7×4 = 98, 2×8 = 52. And give
+  the broadcast **one** reused temp: a temp per row pushed the live set to 34 of 32 zmm registers
+  and the JIT emitted 28 `vmovaps` per reduction step, which are real uops here because 512-bit
+  register moves are not move-eliminated on this microarchitecture.
+- Attention's inner loops must not end in a horizontal reduction. Gather the keys **transposed** so
+  adjacent keys occupy adjacent lanes; a score vector then finishes with a store rather than a
+  shuffle chain. Worth 1.6x on the encoder's attention.
+- `ForwardTiming.Stage` is idempotent for a reason: `using var stage = …` plus an explicit
+  `stage.Dispose()` recorded the stage twice, the second time spanning to the end of the enclosing
+  method. It made one stage look six times more expensive than it was and sent me optimizing the
+  wrong thing. Instrumentation gets the same scepticism as the code it measures.
