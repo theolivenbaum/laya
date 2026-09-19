@@ -1,15 +1,16 @@
 # Laya
 
-**Multilingual, non-autoregressive System 1 decision engine — for .NET.**
+**Typed decisions for .NET, in one forward pass — no Python, no PyTorch, no native dependency.**
 
 Laya answers typed questions (`choice`, `score`, `noul`) about any state — text, an email, a
-ticket, a JSON document — in **one forward pass per question set**. Nothing is generated, so
-there is nothing to parse and nothing to hallucinate; every answer comes back as a distribution
-with a calibrated confidence. It runs on managed CPU SIMD: no Python, no PyTorch, no native
-dependency.
+ticket, a JSON document — and returns a calibrated probability distribution for each answer. Ask
+five questions about one ticket and five answers come back in a single call. Nothing is
+generated, so there is no prompt to tune, no JSON to parse and nothing to hallucinate. It runs on
+the CPU, on managed SIMD, inside your own process.
 
 ```csharp
 using Laya;
+using Laya.Io;
 using Laya.Runtime;
 
 // Downloads the English checkpoint on first use (~843 MB) into ~/.cache/laya.
@@ -17,8 +18,9 @@ using var agent = RemoteCheckpoint.English.Load();
 
 var result = agent.SystemOne("We were billed twice for March, please refund it.", Presets.Triage());
 
-Console.WriteLine(result["intent"].Choice);        // refund
-Console.WriteLine(result["intent"].Confidence);    // normalised entropy of the distribution
+Console.WriteLine(result["intent"].Choice);             // refund
+Console.WriteLine(result["refund_requested"].Noul);    // 0.90
+Console.WriteLine(result["intent"].Confidence);        // normalised entropy of the distribution
 ```
 
 ## Checkpoints
@@ -45,6 +47,7 @@ checkpoint from the Hugging Face hub instead, and `Agent.FromDirectory(path)` lo
 ## Links
 
 * Source, docs and issues: <https://github.com/theolivenbaum/laya>
+* The original Python implementation, by Convai Innovations: <https://github.com/NandhaKishorM/laya>
 * Models: <https://huggingface.co/convaiinnovations/laya>
 
 Apache-2.0. (c) Copyright 2026 Curiosity GmbH - all rights reserved. Laya itself is Copyright (c) 2025 Convai Innovations.
