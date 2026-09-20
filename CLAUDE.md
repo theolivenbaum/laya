@@ -133,7 +133,8 @@ dotnet run --project src/Laya.Cli -c Release -- profile --model-dir … --preset
 dotnet run --project benchmarks/Laya.Benchmarks -c Release -- --filter '*Gemm*'
 ```
 
-`LAYA_THREADS=1` (or `--threads 1`) pins the kernels to one thread; always tune single-threaded
+`LAYA_THREADS=1` (or `--threads 1`) pins the kernels to one thread (per call, pass a `ParallelOptions`
+to `SystemOne` / `Forward` - every kernel resolves it through `LayaRuntime.Resolve`); always tune single-threaded
 first, because a parallel measurement hides a kernel problem behind memory bandwidth.
 `LAYA_VECTOR_BITS=256|512` picks the GEMM kernel.
 

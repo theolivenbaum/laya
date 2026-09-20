@@ -81,16 +81,20 @@ public sealed class PackedMatrix
     /// <see cref="InFeatures"/> values each. <paramref name="output"/> is row-major
     /// <c>[rows, OutFeatures]</c>.
     /// </summary>
-    public unsafe void Multiply(ReadOnlySpan<float> input, int rows, ReadOnlySpan<float> bias, Span<float> output)
-        => Multiply(input, rows, InFeatures, bias, output, OutFeatures);
+    public unsafe void Multiply(ReadOnlySpan<float> input, int rows, ReadOnlySpan<float> bias, Span<float> output,
+        ParallelOptions? parallel = null)
+        => Multiply(input, rows, InFeatures, bias, output, OutFeatures, parallel);
 
     /// <summary>
     /// The same product over activations whose rows are strided — <paramref name="inputStride"/>
     /// and <paramref name="outputStride"/> are the distance between consecutive token rows, which
     /// may exceed the feature count.
     /// </summary>
+    /// <param name="parallel">
+    /// How many threads the panels may be spread over; null means <see cref="LayaRuntime.ParallelOptions"/>.
+    /// </param>
     public unsafe void Multiply(ReadOnlySpan<float> input, int rows, int inputStride,
-        ReadOnlySpan<float> bias, Span<float> output, int outputStride)
+        ReadOnlySpan<float> bias, Span<float> output, int outputStride, ParallelOptions? parallel = null)
     {
         if (input.Length < (long)rows * inputStride) throw new ArgumentException("input is too small", nameof(input));
         if (output.Length < (long)rows * outputStride) throw new ArgumentException("output is too small", nameof(output));
@@ -102,7 +106,7 @@ public sealed class PackedMatrix
 
             // Panels are independent and each owns at least two whole vectors of the output, so
             // neighbouring workers share at most the cache line at a panel boundary.
-            int workers = LayaRuntime.MaxDegreeOfParallelism;
+            int workers = LayaRuntime.WorkersOf(parallel);
             if (workers <= 1 || (long)rows * OutFeatures * InFeatures <= 1_000_000)
             {
                 for (int panel = 0; panel < _panels; ++panel)
@@ -119,7 +123,7 @@ public sealed class PackedMatrix
 
             int chunk = Math.Max(1, _panels / (workers * 4));
             int chunks = (_panels + chunk - 1) / chunk;
-            Parallel.For(0, chunks, LayaRuntime.ParallelOptions, index =>
+            Parallel.For(0, chunks, LayaRuntime.Resolve(parallel), index =>
             {
                 int first = index * chunk;
                 int last = Math.Min(_panels, first + chunk);

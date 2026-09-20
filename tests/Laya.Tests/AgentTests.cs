@@ -12,6 +12,28 @@ namespace Laya.Tests;
 public class AgentTests(ITestOutputHelper output)
 {
     [ModelFact]
+    public void ParallelOptionsDoNotChangeTheAnswers()
+    {
+        using var agent = Agent.FromDirectory(TestModels.CheckpointDirectory("english"));
+        var questions = Presets.Triage();
+        const string state = "I was charged twice for invoice 4411 and I want my money back today.";
+
+        var everyCore = agent.SystemOne(state, questions);
+        var oneThread = agent.SystemOne(state, questions, new ParallelOptions { MaxDegreeOfParallelism = 1 });
+
+        // The kernels split work by panel and by (segment, head), never by partial sums, so the
+        // thread count cannot move a single float.
+        foreach (var (id, answer) in everyCore.Answers)
+        {
+            var other = oneThread[id];
+            Assert.Equal(answer.Choice, other.Choice);
+            Assert.Equal(answer.Score, other.Score);
+            Assert.Equal(answer.Noul, other.Noul);
+            Assert.Equal(answer.Confidence, other.Confidence);
+        }
+    }
+
+    [ModelFact]
     public void TriagePresetAnswersEveryQuestion()
     {
         using var agent = Agent.FromDirectory(TestModels.CheckpointDirectory("english"));

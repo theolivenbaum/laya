@@ -33,6 +33,23 @@ public static class LayaRuntime
     /// <summary>The parallel options the kernels share, rebuilt only when the setting changes.</summary>
     public static ParallelOptions ParallelOptions => new() { MaxDegreeOfParallelism = _maxDegreeOfParallelism };
 
+    /// <summary>
+    /// The options a kernel runs under: the caller's, when a forward pass was handed some, otherwise
+    /// the process-wide default. Every kernel resolves through here so one pass can be pinned to a few
+    /// threads while another uses every core.
+    /// </summary>
+    public static ParallelOptions Resolve(ParallelOptions? options) => options ?? ParallelOptions;
+
+    /// <summary>
+    /// How many workers <paramref name="options"/> allow: their degree of parallelism, or every core
+    /// when it is unbounded (<c>-1</c>, the <see cref="System.Threading.Tasks.ParallelOptions"/> default).
+    /// </summary>
+    public static int WorkersOf(ParallelOptions? options)
+    {
+        int degree = (options ?? ParallelOptions).MaxDegreeOfParallelism;
+        return degree <= 0 ? Environment.ProcessorCount : Math.Min(degree, Environment.ProcessorCount);
+    }
+
     private static int ReadThreads()
     {
         string? configured = Environment.GetEnvironmentVariable("LAYA_THREADS");
