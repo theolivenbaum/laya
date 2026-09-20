@@ -20,17 +20,20 @@ public static class Gemm
     /// <summary>Rows below this run single-threaded; the work does not pay for the fork.</summary>
     private const int ParallelRowThreshold = 2;
 
+    /// <param name="parallel">
+    /// How many threads the row blocks may be spread over; null means <see cref="LayaRuntime.ParallelOptions"/>.
+    /// </param>
     public static void MatMul(ReadOnlySpan<float> a, int m, int k, ReadOnlySpan<float> b, int n,
-        ReadOnlySpan<float> bias, Span<float> c)
+        ReadOnlySpan<float> bias, Span<float> c, ParallelOptions? parallel = null)
     {
         if (a.Length < (long)m * k) throw new ArgumentException("A is too small", nameof(a));
         if (b.Length < (long)n * k) throw new ArgumentException("B is too small", nameof(b));
         if (c.Length < (long)m * n) throw new ArgumentException("C is too small", nameof(c));
 
-        int workers = Environment.ProcessorCount;
+        int workers = LayaRuntime.WorkersOf(parallel);
         if (m >= ParallelRowThreshold && workers > 1 && (long)m * n * k > 1_000_000)
         {
-            RunParallel(a, m, k, b, n, bias, c, workers);
+            RunParallel(a, m, k, b, n, bias, c, workers, LayaRuntime.Resolve(parallel));
             return;
         }
 
@@ -41,7 +44,7 @@ public static class Gemm
     }
 
     private static unsafe void RunParallel(ReadOnlySpan<float> a, int m, int k, ReadOnlySpan<float> b, int n,
-        ReadOnlySpan<float> bias, Span<float> c, int workers)
+        ReadOnlySpan<float> bias, Span<float> c, int workers, ParallelOptions options)
     {
         // Row blocks are independent and write disjoint, contiguous ranges of C, so the only
         // thing crossing threads is the shared read-only weight matrix.
@@ -52,7 +55,7 @@ public static class Gemm
             int blocks = (m + RowBlock - 1) / RowBlock;
             int chunk = Math.Max(1, blocks / (workers * 4));
             int chunks = (blocks + chunk - 1) / chunk;
-            Parallel.For(0, chunks, new ParallelOptions { MaxDegreeOfParallelism = workers }, index =>
+            Parallel.For(0, chunks, options, index =>
             {
                 var av = new ReadOnlySpan<float>((void*)aPtr, m * k);
                 var bv = new ReadOnlySpan<float>((void*)bPtr, n * k);

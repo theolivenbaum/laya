@@ -108,14 +108,19 @@ public sealed class ModernBertEncoder
         => new(weights.ReadFloat32(name), outFeatures, inFeatures);
 
     /// <summary>Runs the encoder over one sequence.</summary>
-    public float[] Forward(ReadOnlySpan<int> tokenIds, IStateRecorder? recorder = null)
-        => Forward(tokenIds, [new Segment(0, tokenIds.Length)], recorder is null ? null : new BatchRecorder(recorder, [""]));
+    public float[] Forward(ReadOnlySpan<int> tokenIds, IStateRecorder? recorder = null, ParallelOptions? parallel = null)
+        => Forward(tokenIds, [new Segment(0, tokenIds.Length)], recorder is null ? null : new BatchRecorder(recorder, [""]), parallel);
 
     /// <summary>
     /// Runs the encoder over a batch of concatenated sequences and returns the final hidden states,
     /// row-major <c>[totalTokens, hidden]</c>.
     /// </summary>
-    public float[] Forward(ReadOnlySpan<int> tokenIds, IReadOnlyList<Segment> segments, BatchRecorder? recorder)
+    /// <param name="parallel">
+    /// The threads every kernel of this pass may use; null means <see cref="LayaRuntime.ParallelOptions"/>.
+    /// Pin it below the core count to run several passes side by side without oversubscribing.
+    /// </param>
+    public float[] Forward(ReadOnlySpan<int> tokenIds, IReadOnlyList<Segment> segments, BatchRecorder? recorder,
+        ParallelOptions? parallel = null)
     {
         int tokens = tokenIds.Length;
         int hidden = _config.HiddenSize;
@@ -162,16 +167,16 @@ public sealed class ModernBertEncoder
                 }
             }
 
-            using (ForwardTiming.Measure("encoder.qkv")) layer.Wqkv.Multiply(normed.AsSpan(0, tokens * hidden), tokens, layer.WqkvBias, qkv);
-            using (ForwardTiming.Measure("encoder.attention")) Attention(qkv, segments, layer.Kind, attention, units);
-            using (ForwardTiming.Measure("encoder.attn_out")) layer.AttnWo.Multiply(attention.AsSpan(0, tokens * hidden), tokens, layer.AttnWoBias, projected);
+            using (ForwardTiming.Measure("encoder.qkv")) layer.Wqkv.Multiply(normed.AsSpan(0, tokens * hidden), tokens, layer.WqkvBias, qkv, parallel);
+            using (ForwardTiming.Measure("encoder.attention")) Attention(qkv, segments, layer.Kind, attention, units, parallel);
+            using (ForwardTiming.Measure("encoder.attn_out")) layer.AttnWo.Multiply(attention.AsSpan(0, tokens * hidden), tokens, layer.AttnWoBias, projected, parallel);
             using (ForwardTiming.Measure("encoder.residual")) SimdOps.Add(hiddenStates.AsSpan(0, tokens * hidden), projected.AsSpan(0, tokens * hidden));
             recorder?.Record($"encoder.layers.{layerIndex}.attn_residual", hiddenStates, segments, hidden);
 
             using (ForwardTiming.Measure("encoder.norm")) NormalizeInto(hiddenStates, normed, tokens, hidden, layer.MlpNormWeight, layer.MlpNormBias);
-            using (ForwardTiming.Measure("encoder.mlp_in")) layer.MlpWi.Multiply(normed.AsSpan(0, tokens * hidden), tokens, layer.MlpWiBias, mlpHidden);
+            using (ForwardTiming.Measure("encoder.mlp_in")) layer.MlpWi.Multiply(normed.AsSpan(0, tokens * hidden), tokens, layer.MlpWiBias, mlpHidden, parallel);
             using (ForwardTiming.Measure("encoder.geglu")) GeGlu(mlpHidden, tokens, intermediate, activated);
-            using (ForwardTiming.Measure("encoder.mlp_out")) layer.MlpWo.Multiply(activated.AsSpan(0, tokens * intermediate), tokens, layer.MlpWoBias, projected);
+            using (ForwardTiming.Measure("encoder.mlp_out")) layer.MlpWo.Multiply(activated.AsSpan(0, tokens * intermediate), tokens, layer.MlpWoBias, projected, parallel);
             using (ForwardTiming.Measure("encoder.residual")) SimdOps.Add(hiddenStates.AsSpan(0, tokens * hidden), projected.AsSpan(0, tokens * hidden));
             recorder?.Record($"encoder.layers.{layerIndex}.output", hiddenStates, segments, hidden);
         }
@@ -222,7 +227,7 @@ public sealed class ModernBertEncoder
     /// time and a twentieth.</para>
     /// </summary>
     private unsafe void Attention(float[] qkv, IReadOnlyList<Segment> segments, AttentionKind kind,
-        float[] destination, (Segment Segment, int Head)[] units)
+        float[] destination, (Segment Segment, int Head)[] units, ParallelOptions? parallel)
     {
         int hidden = _config.HiddenSize;
         int headDim = _config.HeadDim;
@@ -231,7 +236,7 @@ public sealed class ModernBertEncoder
         int window = kind == AttentionKind.Sliding ? _config.SlidingHalfWindow : int.MaxValue;
         var rope = kind == AttentionKind.Global ? _globalRope : _localRope;
 
-        Parallel.For(0, units.Length, LayaRuntime.ParallelOptions, unit =>
+        Parallel.For(0, units.Length, LayaRuntime.Resolve(parallel), unit =>
         {
             var (segment, head) = units[unit];
             int length = segment.Length;

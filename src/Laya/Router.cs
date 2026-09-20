@@ -339,18 +339,20 @@ public sealed class Router : IDisposable
     }
 
     /// <summary>Routes, then answers every question on the chosen checkpoint.</summary>
+    /// <param name="parallel">The threads the pass may use; null means <see cref="LayaRuntime.ParallelOptions"/>.</param>
     public DecisionResult Predict(object? state, QuestionSet questions, string? model = null,
-        string? task = null, string? lang = null)
+        string? task = null, string? lang = null, ParallelOptions? parallel = null)
     {
         var decision = Route(state, questions, model, task, lang);
         var agent = Load(decision.Model);
-        var result = agent.SystemOne(state, questions);
+        var result = agent.SystemOne(state, questions, parallel);
         return result with { Routing = decision };
     }
 
     /// <summary>Alias matching the Python <c>system_one</c>.</summary>
     public DecisionResult SystemOne(object? state, QuestionSet questions, string? model = null,
-        string? task = null, string? lang = null) => Predict(state, questions, model, task, lang);
+        string? task = null, string? lang = null, ParallelOptions? parallel = null)
+        => Predict(state, questions, model, task, lang, parallel);
 
     public override string ToString()
         => $"Router(loaded=[{string.Join(", ", Loaded)}], maxLoaded={MaxLoaded}, default='{Default}')";

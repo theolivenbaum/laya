@@ -107,10 +107,10 @@ public sealed class DecisionModel
 
     /// <summary>Runs one question on its own.</summary>
     public DecisionOutput Forward(ReadOnlySpan<int> tokenIds, ReadOnlySpan<int> markerPositions, int questionType,
-        IStateRecorder? recorder = null)
+        IStateRecorder? recorder = null, ParallelOptions? parallel = null)
     {
         var item = new BatchItem([.. tokenIds], [.. markerPositions], questionType);
-        return Forward([item], recorder is null ? null : new BatchRecorder(recorder, [""]))[0];
+        return Forward([item], recorder is null ? null : new BatchRecorder(recorder, [""]), parallel)[0];
     }
 
     /// <summary>
@@ -121,7 +121,11 @@ public sealed class DecisionModel
     /// embedding, the marker gather and the calibration features are all per question, which is
     /// what makes this identical to running them one at a time.</para>
     /// </summary>
-    public DecisionOutput[] Forward(IReadOnlyList<BatchItem> items, BatchRecorder? recorder = null)
+    /// <param name="parallel">
+    /// The threads every kernel of this pass may use; null means <see cref="LayaRuntime.ParallelOptions"/>.
+    /// </param>
+    public DecisionOutput[] Forward(IReadOnlyList<BatchItem> items, BatchRecorder? recorder = null,
+        ParallelOptions? parallel = null)
     {
         if (items.Count == 0) return [];
 
@@ -136,7 +140,7 @@ public sealed class DecisionModel
         var tokens = new int[total];
         for (int i = 0; i < items.Count; ++i) items[i].TokenIds.CopyTo(tokens, segments[i].Start);
 
-        float[] states = _encoder.Forward(tokens, segments, recorder);
+        float[] states = _encoder.Forward(tokens, segments, recorder, parallel);
 
         // h = h + type_emb(qtype)[:, None, :], with each question's own type over its own rows.
         for (int i = 0; i < items.Count; ++i)
@@ -151,7 +155,7 @@ public sealed class DecisionModel
 
         for (int layer = 0; layer < _headLayers.Length; ++layer)
         {
-            HeadForward(_headLayers[layer], states, total, segments);
+            HeadForward(_headLayers[layer], states, total, segments, parallel);
             recorder?.Record($"head.layers.{layer}.output", states, segments, _hidden);
         }
 
@@ -228,7 +232,8 @@ public sealed class DecisionModel
     /// <c>x = x + attn(norm1(x)); x = x + ff(norm2(x))</c>. PyTorch's default activation is ReLU,
     /// which is what the checkpoint was trained with even though the rest of the model uses GELU.
     /// </summary>
-    private void HeadForward(HeadLayer layer, float[] states, int tokens, IReadOnlyList<Segment> segments)
+    private void HeadForward(HeadLayer layer, float[] states, int tokens, IReadOnlyList<Segment> segments,
+        ParallelOptions? parallel)
     {
         int hidden = _hidden;
         int heads = HeadAttentionHeads;
@@ -250,7 +255,7 @@ public sealed class DecisionModel
         using (ForwardTiming.Measure("head.qkv"))
         {
             layer.InProjWeight.Multiply(normed.AsSpan(0, tokens * hidden), tokens, layer.InProjBias,
-                qkv.AsSpan(0, tokens * 3 * hidden));
+                qkv.AsSpan(0, tokens * 3 * hidden), parallel);
         }
 
         var context = scratch.Rent(tokens * hidden);
@@ -264,14 +269,14 @@ public sealed class DecisionModel
 
         using (ForwardTiming.Measure("head.attention"))
         {
-            HeadAttention(qkv, context, segments, units, hidden, headDim, scale);
+            HeadAttention(qkv, context, segments, units, hidden, headDim, scale, parallel);
         }
 
         var projected = scratch.Rent(tokens * hidden);
         using (ForwardTiming.Measure("head.attn_out"))
         {
             layer.OutProjWeight.Multiply(context.AsSpan(0, tokens * hidden), tokens, layer.OutProjBias,
-                projected.AsSpan(0, tokens * hidden));
+                projected.AsSpan(0, tokens * hidden), parallel);
         }
         SimdOps.Add(states.AsSpan(0, tokens * hidden), projected.AsSpan(0, tokens * hidden));
 
@@ -289,13 +294,13 @@ public sealed class DecisionModel
         using (ForwardTiming.Measure("head.ff_in"))
         {
             layer.Linear1Weight.Multiply(normed.AsSpan(0, tokens * hidden), tokens, layer.Linear1Bias,
-                wide.AsSpan(0, tokens * feedForward));
+                wide.AsSpan(0, tokens * feedForward), parallel);
         }
         using (ForwardTiming.Measure("head.relu")) SimdOps.Relu(wide.AsSpan(0, tokens * feedForward));
         using (ForwardTiming.Measure("head.ff_out"))
         {
             layer.Linear2Weight.Multiply(wide.AsSpan(0, tokens * feedForward), tokens, layer.Linear2Bias,
-                projected.AsSpan(0, tokens * hidden));
+                projected.AsSpan(0, tokens * hidden), parallel);
         }
         SimdOps.Add(states.AsSpan(0, tokens * hidden), projected.AsSpan(0, tokens * hidden));
     }
@@ -311,10 +316,10 @@ public sealed class DecisionModel
     /// faster.</para>
     /// </summary>
     private static unsafe void HeadAttention(float[] qkv, float[] context, IReadOnlyList<Segment> segments,
-        (Segment Segment, int Head)[] units, int hidden, int headDim, float scale)
+        (Segment Segment, int Head)[] units, int hidden, int headDim, float scale, ParallelOptions? parallel)
     {
         int stride = 3 * hidden;
-        Parallel.For(0, units.Length, LayaRuntime.ParallelOptions, unit =>
+        Parallel.For(0, units.Length, LayaRuntime.Resolve(parallel), unit =>
         {
             var (segment, head) = units[unit];
             int length = segment.Length;

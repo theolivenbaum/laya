@@ -263,6 +263,47 @@ public class NumericsTests
     }
 
     [Fact]
+    public void ParallelOptionsDoNotChangeTheProduct()
+    {
+        // Large enough to cross the kernels' parallel thresholds. Each panel and each row block is
+        // computed by exactly one worker whatever the degree, so the results are bit-identical, not
+        // merely close.
+        const int rows = 64, outFeatures = 256, inFeatures = 128;
+        var weight = Random(outFeatures * inFeatures, 25);
+        var input = Random(rows * inFeatures, 26);
+        var bias = Random(outFeatures, 27);
+        var single = new ParallelOptions { MaxDegreeOfParallelism = 1 };
+        var several = new ParallelOptions { MaxDegreeOfParallelism = 3 };
+
+        var packed = new PackedMatrix(weight, outFeatures, inFeatures);
+        var packedDefault = new float[rows * outFeatures];
+        var packedSingle = new float[rows * outFeatures];
+        var packedSeveral = new float[rows * outFeatures];
+        packed.Multiply(input, rows, bias, packedDefault);
+        packed.Multiply(input, rows, bias, packedSingle, single);
+        packed.Multiply(input, rows, bias, packedSeveral, several);
+        Assert.Equal(packedDefault, packedSingle);
+        Assert.Equal(packedDefault, packedSeveral);
+
+        var gemmDefault = new float[rows * outFeatures];
+        var gemmSingle = new float[rows * outFeatures];
+        var gemmSeveral = new float[rows * outFeatures];
+        Gemm.MatMul(input, rows, inFeatures, weight, outFeatures, bias, gemmDefault);
+        Gemm.MatMul(input, rows, inFeatures, weight, outFeatures, bias, gemmSingle, single);
+        Gemm.MatMul(input, rows, inFeatures, weight, outFeatures, bias, gemmSeveral, several);
+        Assert.Equal(gemmDefault, gemmSingle);
+        Assert.Equal(gemmDefault, gemmSeveral);
+    }
+
+    [Fact]
+    public void WorkersOfResolvesUnboundedToEveryCore()
+    {
+        Assert.Equal(Environment.ProcessorCount, LayaRuntime.WorkersOf(new ParallelOptions()));
+        Assert.Equal(1, LayaRuntime.WorkersOf(new ParallelOptions { MaxDegreeOfParallelism = 1 }));
+        Assert.Equal(LayaRuntime.MaxDegreeOfParallelism, LayaRuntime.WorkersOf(null));
+    }
+
+    [Fact]
     public void PackedMatrixAgreesWithTheReferenceGemm()
     {
         const int rows = 11, outFeatures = 96, inFeatures = 128;

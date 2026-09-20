@@ -117,30 +117,31 @@ public sealed class HuggingFaceTokenizer
             }
         }
 
+        var added = new List<AddedToken>();
+        if (root.TryGetProperty("added_tokens", out var addedElement))
+        {
+            foreach (var entry in addedElement.EnumerateArray())
+            {
+                added.Add(new AddedToken(
+                    entry.GetProperty("id").GetInt32(),
+                    entry.GetProperty("content").GetString()!,
+                    entry.TryGetProperty("special", out var sp) && sp.GetBoolean(),
+                    !entry.TryGetProperty("normalized", out var nm) || nm.GetBoolean(),
+                    entry.TryGetProperty("lstrip", out var ls) && ls.GetBoolean(),
+                    entry.TryGetProperty("rstrip", out var rs) && rs.GetBoolean()));
+            }
+        }
+
+        // The added tokens go in before the vocabulary is frozen, so the model is never mutated after
+        // construction.
         var model = new BpeModel(
             vocab,
             merges,
             modelElement.TryGetProperty("unk_token", out var unk) && unk.ValueKind == JsonValueKind.String ? unk.GetString() : null,
             modelElement.TryGetProperty("byte_fallback", out var bf) && bf.GetBoolean(),
             modelElement.TryGetProperty("fuse_unk", out var fu) && fu.GetBoolean(),
-            modelElement.TryGetProperty("ignore_merges", out var im) && im.GetBoolean());
-
-        var added = new List<AddedToken>();
-        if (root.TryGetProperty("added_tokens", out var addedElement))
-        {
-            foreach (var entry in addedElement.EnumerateArray())
-            {
-                var token = new AddedToken(
-                    entry.GetProperty("id").GetInt32(),
-                    entry.GetProperty("content").GetString()!,
-                    entry.TryGetProperty("special", out var sp) && sp.GetBoolean(),
-                    !entry.TryGetProperty("normalized", out var nm) || nm.GetBoolean(),
-                    entry.TryGetProperty("lstrip", out var ls) && ls.GetBoolean(),
-                    entry.TryGetProperty("rstrip", out var rs) && rs.GetBoolean());
-                added.Add(token);
-                model.SetToken(token.Id, token.Content);
-            }
-        }
+            modelElement.TryGetProperty("ignore_merges", out var im) && im.GetBoolean(),
+            [.. added.Select(a => (a.Id, a.Content))]);
 
         INormalizer? normalizer = root.TryGetProperty("normalizer", out var normalizerElement)
             ? NormalizerFactory.Create(normalizerElement)

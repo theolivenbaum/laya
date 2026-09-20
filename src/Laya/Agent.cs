@@ -150,8 +150,17 @@ public sealed class Agent : IDecisionEngine
         => SystemOne(state, questions, recorder: null);
 
     /// <inheritdoc cref="SystemOne(object?, QuestionSet)"/>
+    /// <param name="parallel">
+    /// The threads this pass may use; null means <see cref="LayaRuntime.ParallelOptions"/>. Pin it
+    /// below the core count to run several passes side by side without oversubscribing.
+    /// </param>
+    public DecisionResult SystemOne(object? state, QuestionSet questions, ParallelOptions? parallel)
+        => SystemOne(state, questions, recorder: null, parallel);
+
+    /// <inheritdoc cref="SystemOne(object?, QuestionSet, ParallelOptions?)"/>
     /// <param name="recorder">Receives every intermediate tensor, for parity checking.</param>
-    public DecisionResult SystemOne(object? state, QuestionSet questions, IStateRecorder? recorder)
+    public DecisionResult SystemOne(object? state, QuestionSet questions, IStateRecorder? recorder,
+        ParallelOptions? parallel = null)
     {
         ArgumentNullException.ThrowIfNull(questions);
         if (questions.Count == 0)
@@ -191,7 +200,7 @@ public sealed class Agent : IDecisionEngine
                 [sequence.MarkerPositions.Length]);
         }
 
-        var outputs = Model.Forward(items, recorder is null ? null : new BatchRecorder(recorder, labels));
+        var outputs = Model.Forward(items, recorder is null ? null : new BatchRecorder(recorder, labels), parallel);
 
         var answers = new List<KeyValuePair<string, Answer>>(questionList.Length);
         for (int i = 0; i < questionList.Length; ++i)
@@ -210,7 +219,8 @@ public sealed class Agent : IDecisionEngine
     }
 
     /// <summary>Alias matching the Python <c>predict</c>.</summary>
-    public DecisionResult Predict(object? state, QuestionSet questions) => SystemOne(state, questions);
+    public DecisionResult Predict(object? state, QuestionSet questions, ParallelOptions? parallel = null)
+        => SystemOne(state, questions, recorder: null, parallel);
 
     private Answer BuildAnswer(Question question, DecisionOutput output, int options)
     {

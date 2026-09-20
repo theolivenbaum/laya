@@ -215,7 +215,13 @@ await RemoteCheckpoint.English.PrepareAsync();
 
 The kernels already use every core for a single call (`LAYA_THREADS`, or `--threads`, caps it), so
 throughput comes from batching questions into one `SystemOne` call rather than from calling it
-concurrently.
+concurrently. A host that does want passes side by side hands each one its own budget instead of
+the process-wide default - the thread count never changes a result, only how long it takes:
+
+```csharp
+var quarter = new ParallelOptions { MaxDegreeOfParallelism = Environment.ProcessorCount / 4 };
+var result = agent.SystemOne(state, questions, quarter);   // also on Predict, Router.Predict, DecisionModel.Forward
+```
 
 ---
 

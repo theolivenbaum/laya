@@ -1,4 +1,5 @@
 using System.Collections.Concurrent;
+using System.Collections.Frozen;
 using System.Globalization;
 using System.Text;
 
@@ -14,9 +15,13 @@ namespace Laya.Tokenizers;
 /// </summary>
 public sealed class BpeModel
 {
-    private readonly Dictionary<string, int> _vocab;
-    private string[] _idToToken;
-    private readonly Dictionary<(string, string), int> _ranks;
+    // The vocabulary and the merge table are complete once the model is built and read on every
+    // merge step after that, so they are frozen: a FrozenDictionary picks its hashing strategy for
+    // the keys it holds and is read-only by construction. The word cache is the one map written at
+    // run time, on every miss from whichever thread is encoding, so it stays concurrent.
+    private readonly FrozenDictionary<string, int> _vocab;
+    private readonly string[] _idToToken;
+    private readonly FrozenDictionary<(string, string), int> _ranks;
     private readonly ConcurrentDictionary<string, int[]> _cache = new(StringComparer.Ordinal);
     private readonly int[] _byteFallbackIds = new int[256];
 
@@ -27,23 +32,45 @@ public sealed class BpeModel
     public int UnkId { get; }
     public int Count => _idToToken.Length;
 
-    public BpeModel(Dictionary<string, int> vocab, IReadOnlyList<(string Left, string Right)> merges,
-        string? unkToken, bool byteFallback, bool fuseUnk, bool ignoreMerges)
+    /// <param name="addedTokens">
+    /// The tokenizer's <c>added_tokens</c>, which join the vocabulary under their own ids before it
+    /// is frozen. An added token whose content the vocabulary already has keeps the vocabulary's id.
+    /// </param>
+    public BpeModel(IReadOnlyDictionary<string, int> vocab, IReadOnlyList<(string Left, string Right)> merges,
+        string? unkToken, bool byteFallback, bool fuseUnk, bool ignoreMerges,
+        IReadOnlyList<(int Id, string Content)>? addedTokens = null)
     {
-        _vocab = vocab;
+        var complete = new Dictionary<string, int>(vocab.Count + (addedTokens?.Count ?? 0), StringComparer.Ordinal);
+        foreach (var (token, id) in vocab) complete[token] = id;
+
+        int max = -1;
+        foreach (int id in complete.Values) max = Math.Max(max, id);
+        if (addedTokens is not null)
+        {
+            foreach (var (id, _) in addedTokens) max = Math.Max(max, id);
+        }
+
+        _idToToken = new string[max + 1];
+        foreach (var (token, id) in complete) _idToToken[id] = token;
+        if (addedTokens is not null)
+        {
+            foreach (var (id, content) in addedTokens)
+            {
+                _idToToken[id] = content;
+                complete.TryAdd(content, id);
+            }
+        }
+
+        _vocab = complete.ToFrozenDictionary(StringComparer.Ordinal);
         ByteFallback = byteFallback;
         FuseUnk = fuseUnk;
         IgnoreMerges = ignoreMerges;
         UnkToken = unkToken;
-        UnkId = unkToken is not null && vocab.TryGetValue(unkToken, out int unk) ? unk : -1;
+        UnkId = unkToken is not null && _vocab.TryGetValue(unkToken, out int unk) ? unk : -1;
 
-        int max = 0;
-        foreach (int id in vocab.Values) max = Math.Max(max, id);
-        _idToToken = new string[max + 1];
-        foreach (var (token, id) in vocab) _idToToken[id] = token;
-
-        _ranks = new Dictionary<(string, string), int>(merges.Count);
-        for (int i = 0; i < merges.Count; ++i) _ranks.TryAdd(merges[i], i);
+        var ranks = new Dictionary<(string, string), int>(merges.Count);
+        for (int i = 0; i < merges.Count; ++i) ranks.TryAdd(merges[i], i);
+        _ranks = ranks.ToFrozenDictionary();
 
         for (int b = 0; b < 256; ++b)
         {
@@ -54,19 +81,6 @@ public sealed class BpeModel
     public bool TryGetId(string token, out int id) => _vocab.TryGetValue(token, out id);
 
     public string? TokenAt(int id) => (uint)id < (uint)_idToToken.Length ? _idToToken[id] : null;
-
-    internal void EnsureIdCapacity(int maxId)
-    {
-        if (maxId < _idToToken.Length) return;
-        Array.Resize(ref _idToToken, maxId + 1);
-    }
-
-    internal void SetToken(int id, string content)
-    {
-        EnsureIdCapacity(id);
-        _idToToken[id] = content;
-        _vocab.TryAdd(content, id);
-    }
 
     /// <summary>Tokenizes one pre-token into vocabulary ids.</summary>
     public void Encode(string word, List<int> destination)
