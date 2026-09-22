@@ -397,6 +397,18 @@ dotnet test tests/Laya.Tests -c Release     # tests needing weights skip themsel
 To regenerate them, [`tools/`](tools) has the PyTorch dump-and-compare scripts, and
 `laya dump-states` writes the same tensors from this side.
 
+Laya is also one of the systems measured by [JevBench](https://github.com/theolivenbaum/jevbench),
+an external benchmark for typed decision models.
+[`benchmarks/JevBench/`](benchmarks/JevBench) reimplements that benchmark natively in C#, running
+its public items straight through this repository's own `Agent` (no Python, nothing from the
+jevbench repo executed) and diffing the result against JevBench's own previously published Laya
+row, copied in as a baseline:
+
+```bash
+dotnet run --project benchmarks/JevBench -c Release -- run \
+    --model-dir artifacts/models/english --threads 4
+```
+
 ---
 
 ## Building from source
@@ -414,7 +426,7 @@ the repository unchanged; force it either way with `-p:LayaEnableNet11=true|fals
 ```
 src/Laya/              the library: numerics, tokenizers, ModernBERT, decision head, runtime
 src/Laya.Cli/          the command line tool
-benchmarks/            BenchmarkDotNet suites for the kernels and the forward pass
+benchmarks/            BenchmarkDotNet suites for the kernels and the forward pass, and JevBench
 tests/Laya.Tests/      xunit tests, including the PyTorch parity fixtures
 tools/                 Python scripts that produce reference dumps
 .reference/            the original Python package, kept verbatim as the specification

@@ -5,6 +5,7 @@
   </Folder>
   <Folder Name="/benchmarks/">
     <Project Path="benchmarks/Laya.Benchmarks/Laya.Benchmarks.csproj" />
+    <Project Path="benchmarks/JevBench/Laya.JevBench.csproj" />
   </Folder>
   <Folder Name="/tests/">
     <Project Path="tests/Laya.Tests/Laya.Tests.csproj" />
