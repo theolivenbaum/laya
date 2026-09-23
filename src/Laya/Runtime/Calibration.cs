@@ -9,6 +9,20 @@ namespace Laya.Runtime;
 /// </summary>
 public static class Calibration
 {
+    // A fitted temperature below 1 sharpens the logits instead of softening them. The shipped
+    // `choice:11+` bucket is 0.1006, which multiplies them ~10x: a 0.24 top probability is published
+    // as 0.99. No honest calibration needs to sharpen that hard, so one that does is refused.
+    public const float TemperatureMin = 0.5f;
+    public const float TemperatureMax = 5.0f;
+
+    /// <summary>
+    /// A usable temperature: <paramref name="temperature"/> confined to [<paramref name="min"/>,
+    /// <paramref name="max"/>], or the neutral 1.0 when it is NaN or infinite. Clamping cannot change
+    /// which option wins — dividing by a positive scalar keeps the argmax — only the confidence.
+    /// </summary>
+    public static float ClampTemperature(float temperature, float min = TemperatureMin, float max = TemperatureMax)
+        => float.IsFinite(temperature) ? Math.Clamp(temperature, min, max) : 1f;
+
     /// <summary>Normalized Shannon entropy confidence: <c>1 - H(p) / log(k)</c>.</summary>
     public static double ConfidenceFromProbabilities(ReadOnlySpan<float> probabilities, int k)
     {

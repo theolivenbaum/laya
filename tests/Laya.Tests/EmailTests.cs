@@ -95,3 +95,33 @@ public class EmailTests
         Assert.DoesNotContain(state, e => e.Key == "label");
     }
 }
+
+/// <summary>
+/// A disclaimer footer must not delete the sender's request. Ported from
+/// <c>.reference/tests/test_email.py</c> (upstream #94).
+/// </summary>
+public class EmailDisclaimerTests
+{
+    private const string Disclaimer = "This email is confidential and intended solely for the named addressee.";
+
+    [Theory]
+    [InlineData("My account is locked.\n" + Disclaimer + "\nPlease unlock it.", "My account is locked. Please unlock it.")]
+    [InlineData("My account is locked\n" + Disclaimer + "\nPlease unlock it.", "Please unlock it.")]
+    [InlineData("My account is locked. " + Disclaimer, "My account is locked.")]
+    [InlineData("My account is locked.\n\n" + Disclaimer, "My account is locked.")]
+    [InlineData("My account is locked.\n\nThis email and any files transmitted with it are\n" +
+                "confidential and intended solely for the named addressee.", "My account is locked.")]
+    [InlineData("Please reopen ticket 4411.\n\nIf you have received this message in error, delete it.", "Please reopen ticket 4411.")]
+    [InlineData("Thanks for the update.\nOn Mon, Sep 20, Bob wrote:\n> original text", "Thanks for the update.")]
+    [InlineData("Hi team,\nCan you confirm the refund?\nRegards,\nAlice", "Hi team,\nCan you confirm the refund?")]
+    [InlineData("", "")]
+    public void KeepsTheRequest(string body, string expected)
+        => Assert.Equal(expected, EmailUtils.CleanEmailBody(body));
+
+    [Fact]
+    public void EmailStateKeepsTheRequest()
+    {
+        var state = EmailUtils.EmailState("Locked out", "My account is locked. " + Disclaimer);
+        Assert.Equal("My account is locked.", state.Single(p => p.Key == "body").Value);
+    }
+}

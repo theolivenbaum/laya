@@ -42,29 +42,33 @@ Three checkpoints, and a `Router` that picks between them per request:
 pip install laya
 ```
 
+Python 3.10 or newer. The dependencies set that floor: `huggingface_hub` 1.x, `transformers` 5.x and `torch` 2.14 all require 3.10.
+
 ---
 
-## Quickstart
+## Quickstart: Route Mode (Recommended)
+
+Laya ships three checkpoints. The built-in **`Router`** is the recommended entry point: it evaluates any state in any language, automatically detects scripts and languages in sub-milliseconds, and dispatches to the optimal checkpoint in a single forward pass.
 
 ```python
 import laya
+from laya import Router
 
-# 1. Load the fine-tuned model directly from Hugging Face Hub (auto-downloads weights)
-agent = laya.load("convaiinnovations/laya")
+# Preload checkpoints into memory for instant sub-35ms routing
+router = Router(preload=True)
 
-# 2. Provide any state (string or dictionary)
+# 1. State in any language or schema
 state = {
     "from": "user@acme.com",
     "subject": "Duplicate charge on invoice #4411",
     "body": "Hi, we were billed twice for March. Please refund the duplicate today or we will cancel our plan."
 }
 
-# 3. Define your typed questions
+# 2. Define your typed questions
 questions = {
-    # choice: categorical selection with probabilities & confidence
     "department": {
         "type": "choice",
-        "instructions": "Which department should handle this email?",
+        "instructions": "Which department should handle this request?",
         "criteria": {
             "billing": "invoices, payments, refunds",
             "technical": "bugs, outages, system errors",
@@ -72,38 +76,117 @@ questions = {
             "other": "everything else"
         }
     },
-    # score: placement on an ordinal rubric
     "urgency": {
         "type": "score",
         "instructions": "How urgent is this request?",
         "criteria": ["not urgent", "soon", "critical deadline or blocking issue"]
     },
-    # noul: calibrated boolean probability P(true)
     "churn_risk": {
         "type": "noul",
         "instructions": "Does the user threaten to cancel or leave?"
     },
-    "is_phishing": {
+    "refund_requested": {
         "type": "noul",
-        "instructions": "Is this email a phishing or scam attempt?"
+        "instructions": "Does the user explicitly request a refund?"
     }
 }
 
-# 4. Run all questions in ONE single forward pass (~35 ms on GPU)
+# 3. English state -> automatically routed to laya (ModernBERT-large, 39.5 ms)
+res_en = router.predict(state, questions)
+print("Department :", res_en["answers"]["department"]["choice"])  # -> billing (confidence: 0.94)
+print("Routing    :", res_en["routing"]["model"])                 # -> english
+
+# 4. Hindi state -> automatically routed to laya-multilingual (mmBERT-base, 32.8 ms)
+res_hi = router.predict({"body": "मुझसे दो बार शुल्क लिया गया, कृपया पैसे वापस करें।"}, questions)
+print("Department :", res_hi["answers"]["department"]["choice"])  # -> billing (confidence: 0.86)
+print("Routing    :", res_hi["routing"]["model"])                 # -> multilingual
+
+# 5. Explicit override when you want a specific checkpoint
+res_td = router.predict(state, questions, model="typed-decisions")
+```
+
+Every result carries full routing metadata explaining why the choice was made:
+
+```python
+res_hi["routing"]
+# {
+#   'model': 'multilingual',
+#   'repo': 'convaiinnovations/laya/multilingual',
+#   'reason': 'non-Latin script (devanagari, 100% of letters); the English checkpoint cannot read it'
+# }
+```
+
+Inspect a routing decision without running any forward pass:
+
+```python
+router.route({"body": "Der Kunde wurde zweimal belastet"}, questions).reason
+# "Latin script but language looks like 'de', not English"
+```
+
+### Why Route: The Evidence
+
+On a shared benchmark (17,416 questions, one T4 GPU, identical questions per model):
+
+| Benchmark / Task | English (`laya`) | Multilingual (`laya-multilingual`) | `Router` (Routed) |
+|---|---|---|---|
+| MASSIVE intent, English | **0.783** | 0.657 | **0.783** |
+| MASSIVE intent, 13 other languages | 0.306 | **0.451** | **0.451** |
+| XNLI, English | **0.860** | 0.843 | **0.860** |
+| XNLI, 14 other languages | 0.521 | **0.731** | **0.731** |
+| Languages usable (>3x random) | 23 / 51 | 45 / 51 | **45 / 51** |
+| Latency, 1 question (T4 GPU) | 39.5 ms | **32.8 ms** | **32.8 ms** |
+| Latency, 10 questions batched | 158.6 ms | **72.3 ms** | **72.3 ms** |
+
+The English checkpoint collapses on non-Latin scripts (Khmer scores **0.000 accuracy at 0.952 confidence**). Because the model stays confident while being wrong, confidence gating cannot save you. `Router` detects the script in <0.5 ms pure Python before the forward pass.
+
+### Production Preload & Memory
+
+A cold checkpoint build costs seconds; language detection costs microseconds. At the default `max_loaded=1`, traffic that alternates languages rebuilds a model on *every* request (measured at a 7.4 s median reload on CPU and 10.3 s on T4).
+
+For a server or production app, preload:
+
+```python
+# Every checkpoint resident in memory; language flips cost detection only (<1 ms)
+router = Router(preload=True)
+router = Router(preload=True, device="cuda")
+
+# Or preload only the specific checkpoints you serve:
+router.preload(["english", "multilingual"])
+
+# If your app already built an agent, attach it to avoid duplicate VRAM:
+router.attach("english", existing_agent)
+
+# Manage resident memory (default keeps 1 hot, LRU eviction)
+router = Router(max_loaded=2)       # keep two hot
+router.unload()                     # free memory
+```
+
+| Deployment Mode | Per-Request Latency | Model Reloads |
+|---|---|---|
+| `Router()` (lazy, `max_loaded=1`) | 7 to 10 s on every language switch | 1 per switch |
+| `Router(preload=True)` | **32.8 ms (GPU) / 193–464 ms (CPU)** | **none** |
+
+---
+
+## Single-Model Mode (Direct SDK)
+
+If you only need a single checkpoint for a dedicated pipeline, you can load models directly:
+
+```python
+import laya
+
+# 1. Load a specific checkpoint directly from the hub
+agent = laya.load("convaiinnovations/laya")                           # English root
+agent_ml = laya.load("convaiinnovations/laya", subfolder="multilingual") # 100+ languages
+agent_td = laya.load("convaiinnovations/laya", subfolder="typed-decisions")
+
+# 2. Run all questions in ONE single forward pass (~35 ms on GPU)
 result = agent.predict(state, questions)
 answers = result["answers"]
 
-print("Department :", answers["department"]["choice"])
-# -> billing (confidence: 0.94)
-
-print("Urgency    :", answers["urgency"]["score"])
-# -> 1.84 / 2.0
-
-print("Churn Risk :", answers["churn_risk"]["noul"])
-# -> 0.892 (89.2% probability)
-
-print("Phishing   :", answers["is_phishing"]["noul"])
-# -> 0.008 (0.8% probability)
+print("Department :", answers["department"]["choice"])   # -> billing (confidence: 0.94)
+print("Urgency    :", answers["urgency"]["score"])        # -> 1.84 / 2.0
+print("Churn Risk :", answers["churn_risk"]["noul"])       # -> 0.892 (89.2% probability)
 ```
 
 ---
@@ -146,123 +229,6 @@ safety = agent.predict({"post": "User comment text"}, laya.moderation_questions(
 
 # 4. Support Ticket Triage (intent, urgency, frustration, churn)
 triage = agent.predict({"message": "My payment failed twice"}, laya.triage_questions())
-```
-
----
-
-## Model Routing (three checkpoints, one call)
-
-Laya ships three checkpoints. `Router` picks the right one per request and loads it lazily.
-
-| name | repo | size | context | best at |
-|---|---|---|---|---|
-| `english` | [`convaiinnovations/laya`](https://huggingface.co/convaiinnovations/laya) | 421M | 512 | English text |
-| `multilingual` | [`convaiinnovations/laya-multilingual`](https://huggingface.co/convaiinnovations/laya-multilingual) | 322M | 1024 | 100+ languages, 2x faster |
-| `typed-decisions` | [`convaiinnovations/laya-typed-decisions`](https://huggingface.co/convaiinnovations/laya-typed-decisions) | 421M | 1024 | the four typed-decisions workflows |
-
-```python
-from laya import Router
-
-router = Router()          # nothing is downloaded until a request needs it
-
-# English -> routed to the English checkpoint
-router.predict({"body": "I was charged twice, please refund."}, questions)
-
-# Hindi -> routed to the multilingual checkpoint automatically
-router.predict({"body": "मुझसे दो बार शुल्क लिया गया"}, questions)
-
-# explicit when you already know
-router.predict(state, questions, model="typed-decisions")
-router.predict(state, questions, lang="de")
-```
-
-Every result carries the decision that produced it:
-
-```python
-result = router.predict({"body": "二重に請求されました"}, questions)
-result["routing"]
-# {'model': 'multilingual',
-#  'repo': 'convaiinnovations/laya-multilingual',
-#  'reason': 'non-Latin script (kana, 100% of letters); the English checkpoint cannot read it',
-#  ...}
-```
-
-Inspect a decision without running the model:
-
-```python
-router.route({"body": "Der Kunde wurde zweimal belastet"}, questions).reason
-# "Latin script but language looks like 'de', not English"
-```
-
-### Why route at all
-
-Accuracy on a shared benchmark (17,416 questions, one T4, identical questions per model):
-
-| | `english` | `multilingual` |
-|---|---|---|
-| MASSIVE intent, English | **0.783** | 0.657 |
-| MASSIVE intent, 13 other languages | 0.306 | **0.451** |
-| XNLI, English | **0.860** | 0.843 |
-| XNLI, 14 other languages | 0.521 | **0.731** |
-| English-only suites | **0.684** | 0.619 |
-| Latency, 10 questions | 159 ms | **72 ms** |
-
-The English checkpoint does not degrade gracefully outside English -- it collapses, and stays
-confident while doing so. On 20-option MASSIVE intent (random = 0.050) it scores 0.100 on Hindi
-and 0.103 on Korean, with an expected calibration error of 0.855. Script detection is therefore
-the primary routing signal.
-
-### Routing rules
-
-Precedence, highest first:
-
-1. `model=` -- explicit checkpoint.
-2. `task="typed_decisions"` -- explicit task.
-3. A question-id set exactly matching a typed-decisions workflow, **only** if you construct the
-   router with `auto_task_detection=True`. It is off by default: that checkpoint is fine-tuned on
-   four synthetic workflows and should not be a silent fallback.
-4. `lang=` -- explicit language code.
-5. Detected script (exact) and, for Latin text, a stopword/diacritic language guess (best effort).
-6. `default=` (`"english"` unless you change it).
-
-### Preload — make routing free
-
-A cold checkpoint build costs **seconds**; language detection costs **microseconds**. At the
-default `max_loaded=1`, traffic that alternates languages rebuilds a model on *every* request.
-For a server or a demo, preload:
-
-```python
-router = Router(preload=True)                  # every checkpoint resident, routing is free
-router = Router(preload=True, device="cuda")
-router.preload(["english", "multilingual"])    # or just the two you serve
-```
-
-`preload` raises `max_loaded` to fit what it built, so the LRU cannot evict it immediately.
-
-If the process already has a checkpoint loaded for other reasons, hand it over instead of
-loading a second copy:
-
-```python
-router.attach("english", existing_agent)   # no duplicate 421M parameters
-router.preload()                           # builds only what is still missing
-```
-
-Measured on CPU with the demo Space's own workload:
-
-| | per request | model loads |
-|---|---|---|
-| `Router()` — lazy, `max_loaded=1` | 4–6 s on every language switch | 1 per switch |
-| `Router(preload=True)` | **193–464 ms** | **none** |
-
-### Memory
-
-All three together are ~1.16B parameters (~4.6 GB fp32), so `Router` keeps **one** resident by
-default and evicts least-recently-used. Raise it when you have the RAM:
-
-```python
-Router(max_loaded=2)       # keep two hot
-router.unload()            # free everything
-router.loaded              # ['multilingual']
 ```
 
 ---
@@ -327,7 +293,7 @@ failure for anything branching on confidence.
 
 #### Where Jev leads
 
-* **High-cardinality label spaces (>20 options at default settings):** On Banking77, Jev scores 0.870 (on 72 labels) while Laya scores 0.425 (on 77 labels at default 256-token head budget). This is an architectural token-budget constraint: options share a fixed `head_max_len` budget (192 tokens on English, 256 on multilingual), so 77 options receive only ~3 to 4 tokens per label, causing text to become indistinguishable. Jev supports up to 255 options out-of-the-box. While `laya-multilingual` supports 1,024 context (and up to 8,192 in the encoder) and you can raise `agent.cfg["head_max_len"] = 512` at runtime, Jev is currently better suited for 50+ options in a single prompt without tuning.
+* **High-cardinality label spaces (>20 options at default settings):** On Banking77, Jev scores 0.870 (on 72 labels) while Laya scores 0.425 (on 77 labels at default 256-token head budget). This is an architectural token-budget constraint: options share a fixed `head_max_len` budget (192 tokens on English, 256 on multilingual), so 77 options receive only ~3 to 4 tokens per label, causing text to become indistinguishable. Jev supports up to 255 options out-of-the-box. While `laya-multilingual` supports 1,024 context (and up to 8,192 in the encoder) and you can raise `agent.cfg["head_max_len"] = 512` at runtime, Jev is currently better suited for 50+ options in a single prompt without tuning. `predict_shortlist` (see [Honest limits](#honest-limits)) keeps the top `k` labels with a caller-supplied embedding, then runs one forward pass on that shortlist.
 * **Soft distribution matching:** On typed-decisions, while Laya achieves higher argmax accuracy (0.766 vs 0.727), Jev achieves higher soft accuracy (0.580 vs 0.471) against the teacher's full probability distributions.
 * **Out-of-the-box raw calibration:** Before temperature scaling, the base checkpoint has higher raw ECE (0.213 vs 0.144). Laya achieves its 0.081 ECE after domain temperature fitting.
 
@@ -402,7 +368,37 @@ temperatures at all, so fit them before relying on its probabilities.
   * `laya-multilingual` and `laya-typed-decisions` default to 1,024 context (`head_max_len = 256`, ~768 tokens for state; mmBERT-base encoder supports up to 8,192 with RoPE).
   At default settings, a 77-option question like Banking77 allocates only `(256 - 16) // 77` ≈ 3–4 tokens per label, which causes accuracy to fall off sharply (0.425 vs Jev's 0.870). If evaluating 50+ options in a single question:
   1. Raise `agent.cfg["head_max_len"] = 512` and `agent.cfg["max_len"] = 1024` (or up to 2048 / 4096 / 8192) so every option has enough tokens to remain distinct.
-  2. Or split large option sets into a two-step coarse-to-fine hierarchical choice.
+  2. Or shortlist with embeddings and run one forward pass on the top `k` labels (`predict_shortlist`, example below). `predict` and `system_one` still score every criterion they are given.
+  3. Or split the label set yourself into a coarse question and a fine question.
+
+```python
+import laya
+
+questions = {
+    "intent": {
+        "type": "choice",
+        "instructions": "Which banking intent is this?",
+        "criteria": {
+            "card_arrival": "where is my card",
+            "transfer_fee": "fee charged on a transfer",
+            # ...the rest of a large label set
+        },
+    }
+}
+result = laya.predict_shortlist(
+    agent,
+    {"text": "I was charged twice for a transfer"},
+    questions,
+    embed_fn=laya.embed_fn_from_agent(agent),  # or any callable: texts -> (n, dim)
+    k=20,
+)
+result["shortlist"]["intent"]["labels"]  # the top 20 labels sent to the model
+```
+
+`embed_fn(texts)` returns one vector per string. `embed_fn_from_agent` mean-pools the encoder already loaded on the agent; the decision head runs in the following `predict` / `system_one` call. Probabilities on a shortlisted choice are over those `k` labels. When `k` is at least the number of labels, the original question is passed through and `embed_fn` is not called.
+
+[Issue #102](https://github.com/NandhaKishorM/laya/issues/102) reports that a top-20 zero-shot shortlist moved a BANKING77 run from 54.3% to 60.8% on the reporter's setup. Those figures are the reporter's; this repository has not remeasured them.
+
 * Ordinal `score` questions are the weakest primitive (SST-5 0.372).
 * `laya` collapses outside English; `laya-multilingual` is weaker on English. Route, or pick
   deliberately.

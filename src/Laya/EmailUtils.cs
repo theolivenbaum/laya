@@ -31,6 +31,9 @@ public static partial class EmailUtils
         @"if you (have )?received this (e-?mail|message) in error)", RegexOptions.IgnoreCase | RegexOptions.Compiled)]
     private static partial Regex Disclaimer();
 
+    [GeneratedRegex(@"(?<=[.!?])\s+", RegexOptions.Compiled)]
+    private static partial Regex SentenceSplit();
+
     [GeneratedRegex(@"\n\s*\n", RegexOptions.Compiled)]
     private static partial Regex ParagraphSplit();
 
@@ -74,12 +77,26 @@ public static partial class EmailUtils
         lines = lines[..cut];
 
         var paragraphs = ParagraphSplit().Split(string.Join('\n', lines))
-            .Where(p => !Disclaimer().IsMatch(p))
+            .Select(StripDisclaimer)
             .Select(p => p.Trim())
             .Where(p => p.Length > 0);
 
         string cleaned = HorizontalWhitespace().Replace(string.Join("\n\n", paragraphs), " ");
         return cleaned.Length <= maxChars ? cleaned : cleaned[..maxChars];
+    }
+
+    /// <summary>
+    /// Drops boilerplate disclaimer text from one paragraph. The paragraph goes whole only when every
+    /// sentence in it is boilerplate: a footer that runs on without a blank line used to take the
+    /// sender's actual request with it, which is worse than leaving one boilerplate line behind.
+    /// </summary>
+    private static string StripDisclaimer(string paragraph)
+    {
+        if (!Disclaimer().IsMatch(paragraph)) return paragraph;   // keep the original line structure
+        var sentences = SentenceSplit().Split(paragraph)
+            .Select(p => p.Trim())
+            .Where(p => p.Length > 0 && !Disclaimer().IsMatch(p));
+        return string.Join(' ', sentences);
     }
 
     /// <summary>Builds the state dictionary for email classification.</summary>
