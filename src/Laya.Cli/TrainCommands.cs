@@ -99,6 +99,24 @@ internal static class TrainCommands
         return 0;
     }
 
+    /// <summary>Refits a checkpoint's temperatures on labelled cases, leaving its weights alone.</summary>
+    public static int Calibrate(CommandLine options, Func<CommandLine, string> modelDirectory)
+    {
+        string directory = modelDirectory(options);
+        var config = LayaConfig.Load(Path.Combine(directory, "rl_agent_config.json"));
+        var tokenizer = HuggingFaceTokenizer.FromDirectory(Path.Combine(directory, "tokenizer"));
+        var items = DecisionDataset.BuildItems(tokenizer, ReadCases(options, "data", "train"), config.MaxLength, config.HeadMaxLength)
+            .Select(i => i.Item).ToList();
+        var sample = Trainer.CalibrationSample(items, new TrainerOptions
+        {
+            CalibrationStride = Int(options.Value("stride"), 1),
+            CalibrationMaximum = Int(options.Value("max-items"), 400),
+        });
+        var fit = Trainer.Recalibrate(directory, sample);
+        Console.WriteLine($"calibrated {directory} on {sample.Count} items: {Trainer.Describe(fit)}");
+        return 0;
+    }
+
     public static int Evaluate(CommandLine options, Func<CommandLine, string> modelDirectory)
         => EvaluateDirectory(options, modelDirectory(options));
 

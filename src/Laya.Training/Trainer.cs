@@ -39,7 +39,10 @@ public sealed record TrainerOptions
     /// <summary>Stop after this many optimizer steps (smoke tests, time-boxed runs).</summary>
     public int? MaxSteps { get; init; }
 
-    /// <summary>Calibration uses every <c>n</c>-th training item, at most <see cref="CalibrationMaximum"/> (the notebook: 15 and 400).</summary>
+    /// <summary>
+    /// Calibration uses one training item in <c>n</c>, at most <see cref="CalibrationMaximum"/> (the
+    /// notebook: 15 and 400), drawn at random — see <see cref="Trainer.CalibrationSample"/>.
+    /// </summary>
     public int CalibrationStride { get; init; } = 15;
     public int CalibrationMaximum { get; init; } = 400;
 
@@ -164,21 +167,11 @@ public sealed class Trainer(TrainerOptions? options = null)
             }
         }
 
-        // Post-training temperature calibration, on the notebook's in-sample subset unless given one.
-        var calibration = calibrationItems
-            ?? [.. items.Where((_, i) => i % Math.Max(1, o.CalibrationStride) == 0).Take(o.CalibrationMaximum)];
-        var samples = new List<CalibrationSample>(calibration.Count);
-        for (int start = 0; start < calibration.Count; start += 16)
-        {
-            var chunk = calibration.Skip(start).Take(16).ToList();
-            var (logits, _) = model.Forward(chunk, training: false, keepTape: false, parallel: parallel);
-            for (int i = 0; i < chunk.Count; ++i) samples.Add(new CalibrationSample(chunk[i].QuestionType, logits[i], chunk[i].Target));
-        }
-        var fit = TemperatureFitting.Fit(samples, o.MinimumBucketSamples);
+        // Post-training temperature calibration, on a sample of the training items unless given a set.
+        var calibration = calibrationItems ?? CalibrationSample(items, o);
+        var fit = Calibrate(model, calibration, o.MinimumBucketSamples, parallel);
         Report(new TrainingProgress(o.Epochs, o.Epochs, 0, optimizer.Steps, 0, 0, 0, 0, clock.Elapsed,
-            string.Create(CultureInfo.InvariantCulture,
-                $"calibrated on {samples.Count} items: choice {fit.ByType[0]:F3}, score {fit.ByType[1]:F3}, noul {fit.ByType[2]:F3}; " +
-                $"buckets {string.Join(", ", fit.ByBucket.Select(b => $"{b.Key}={b.Value:F3}"))}")));
+            $"calibrated on {calibration.Count} items: {Describe(fit)}"));
 
         model.Save(outputDirectory, sourceDirectory,
             BuildConfig(sourceDirectory, o, fit, maxLength, headMaxLength, optimizer.Steps, epochLoss.Count, clock.Elapsed));
@@ -187,6 +180,64 @@ public sealed class Trainer(TrainerOptions? options = null)
     }
 
     private void Report(TrainingProgress progress) => Progress?.Report(progress);
+
+    /// <summary>
+    /// The notebook calibrates on <c>all_items[::15][:400]</c>. Items arrive grouped by case, and a
+    /// typed-decisions case asks five questions in a fixed order, so a stride of 15 picks the same
+    /// question of every third case: every sample is a <c>choice</c>, and <c>score</c> and <c>noul</c>
+    /// are never fitted. The same number of items is drawn at random instead (seeded, so a run is
+    /// reproducible), which samples every question of every workflow.
+    /// </summary>
+    public static List<TrainingItem> CalibrationSample(IReadOnlyList<TrainingItem> items, TrainerOptions options)
+    {
+        int count = Math.Min(options.CalibrationMaximum, (items.Count + options.CalibrationStride - 1) / Math.Max(1, options.CalibrationStride));
+        var indices = Enumerable.Range(0, items.Count).ToArray();
+        new Random(options.Seed).Shuffle(indices);
+        return [.. indices.Take(count).Order().Select(i => items[i])];
+    }
+
+    /// <summary>Runs the calibration items through the model (no dropout) and fits the temperatures.</summary>
+    public static TemperatureFit Calibrate(TrainableDecisionModel model, IReadOnlyList<TrainingItem> items,
+        int minimumBucketSamples = 30, ParallelOptions? parallel = null)
+    {
+        var samples = new List<CalibrationSample>(items.Count);
+        for (int start = 0; start < items.Count; start += 16)
+        {
+            var chunk = items.Skip(start).Take(16).ToList();
+            var (logits, _) = model.Forward(chunk, training: false, keepTape: false, parallel: parallel);
+            for (int i = 0; i < chunk.Count; ++i) samples.Add(new CalibrationSample(chunk[i].QuestionType, logits[i], chunk[i].Target));
+        }
+        return TemperatureFitting.Fit(samples, minimumBucketSamples);
+    }
+
+    public static string Describe(TemperatureFit fit) => string.Create(CultureInfo.InvariantCulture,
+        $"choice {fit.ByType[0]:F3}, score {fit.ByType[1]:F3}, noul {fit.ByType[2]:F3}; " +
+        $"buckets {string.Join(", ", fit.ByBucket.Select(b => $"{b.Key}={b.Value:F3} (n={fit.SamplesPerBucket[b.Key]})"))}");
+
+    /// <summary>
+    /// Refits the temperatures of an existing checkpoint in place: the weights are untouched, only
+    /// <c>temperature</c> and <c>temperature_by_options</c> in <c>rl_agent_config.json</c> change.
+    /// </summary>
+    public static TemperatureFit Recalibrate(string directory, IReadOnlyList<TrainingItem> items,
+        int minimumBucketSamples = 30, ParallelOptions? parallel = null)
+    {
+        var model = TrainableDecisionModel.FromDirectory(directory);
+        var fit = Calibrate(model, items, minimumBucketSamples, parallel);
+        string path = Path.Combine(directory, "rl_agent_config.json");
+        var config = JsonNode.Parse(File.ReadAllText(path))!.AsObject();
+        WriteTemperatures(config, fit);
+        File.WriteAllText(path, config.ToJsonString(new JsonSerializerOptions { WriteIndented = true }));
+        return fit;
+    }
+
+    private static void WriteTemperatures(JsonObject config, TemperatureFit fit)
+    {
+        config["temperature"] = new JsonArray([.. fit.ByType.Select(t => (JsonNode)JsonValue.Create((double)t))]);
+        // Replace, never merge: a bucket left over from the base checkpoint would shadow the new fit.
+        var buckets = new JsonObject();
+        foreach (var (bucket, value) in fit.ByBucket) buckets[bucket] = (double)value;
+        config["temperature_by_options"] = buckets;
+    }
 
     private static void Shuffle<T>(List<T> list, Random random)
     {
@@ -209,14 +260,7 @@ public sealed class Trainer(TrainerOptions? options = null)
         if (headMaxLength is int hml) config["head_max_len"] = hml;
         config["fine_tuned"] = true;
         config["model_name"] = o.ModelName;
-        if (fit is not null)
-        {
-            config["temperature"] = new JsonArray([.. fit.ByType.Select(t => (JsonNode)JsonValue.Create((double)t))]);
-            // Replace, never merge: a bucket left over from the base checkpoint would shadow the new fit.
-            var buckets = new JsonObject();
-            foreach (var (bucket, value) in fit.ByBucket) buckets[bucket] = (double)value;
-            config["temperature_by_options"] = buckets;
-        }
+        if (fit is not null) WriteTemperatures(config, fit);
         config["training"] = new JsonObject
         {
             ["updates"] = steps,

@@ -102,6 +102,21 @@ public class TrainingTests
     }
 
     [Fact]
+    public void CalibrationSamplesEveryQuestionType()
+    {
+        // Five questions per case in a fixed order, as typed-decisions stores them: the notebook's
+        // all_items[::15] would pick question 0 of every third case, i.e. only choices.
+        var types = new[] { 0, 2, 0, 1, 1 };
+        var items = Enumerable.Range(0, 1500).Select(i => new TrainingItem([0], [0, 1], types[i % 5], [0.5f, 0.5f])).ToList();
+        Assert.All(items.Where((_, i) => i % 15 == 0), item => Assert.Equal(0, item.QuestionType));
+
+        var sample = Trainer.CalibrationSample(items, new TrainerOptions());
+        Assert.Equal(100, sample.Count);
+        Assert.Equal([0, 1, 2], sample.Select(i => i.QuestionType).Distinct().Order());
+        Assert.Equal(sample.Select(i => i.QuestionType), Trainer.CalibrationSample(items, new TrainerOptions()).Select(i => i.QuestionType));
+    }
+
+    [Fact]
     public void TargetsFollowTheNotebook()
     {
         var gold = new GoldAnswer("b", new Dictionary<string, double> { ["a"] = 1, ["b"] = 3 }, null, null);

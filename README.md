@@ -305,6 +305,7 @@ laya bench         Time the forward pass
 laya profile       Stage timings, allocations and a sampling profile
 laya dataset       Download a typed-decisions split to JSON lines
 laya train         Fine-tune a checkpoint (see Fine-tuning)
+laya calibrate     Refit a checkpoint's temperatures on labelled cases, weights untouched
 laya evaluate      Accuracy, soft accuracy, Brier, ECE, KL, score MAE on typed-decisions cases
 ```
 
@@ -354,7 +355,10 @@ head only) and costs proportionally less. Every layer is checkpointed, so activa
 at one layer's worth whatever the batch. The defaults are the notebook's; the notebook ran two GPUs,
 so its effective batch was twice one process's.
 
-Two things differ from the notebook on purpose. Calibration also fits the `type:option-count`
+Three things differ from the notebook on purpose. Its calibration set, `all_items[::15]`, strides
+over items grouped five questions to a case, so every sample is the same question — a `choice` —
+and `score` and `noul` are never fitted; the same number of items is drawn at random instead.
+Calibration also fits the `type:option-count`
 buckets that inference reads first, and replaces the base checkpoint's buckets — the notebook left
 them in place, where they shadowed its new per-type fit. And fitted temperatures are clamped to the
 range inference applies, so what is saved is what is used.

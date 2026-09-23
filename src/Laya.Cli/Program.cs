@@ -49,6 +49,7 @@ internal static class Program
                 "dataset" => TrainCommands.Dataset(options),
                 "train" => TrainCommands.Train(options, ModelDirectory),
                 "evaluate" => TrainCommands.Evaluate(options, ModelDirectory),
+                "calibrate" => TrainCommands.Calibrate(options, ModelDirectory),
                 _ => Unknown(args[0]),
             };
         }
@@ -84,6 +85,7 @@ internal static class Program
           profile       Stage timings, allocations and a sampling profile of a forward pass
           dataset       Download a typed-decisions split to JSON lines
           train         Fine-tune a checkpoint (RLCD objective, AdamW, temperature calibration)
+          calibrate     Refit a checkpoint's temperatures on labelled cases (weights untouched)
           evaluate      Score a checkpoint on typed-decisions cases (accuracy, Brier, ECE, ...)
 
         COMMON OPTIONS

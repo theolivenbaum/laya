@@ -135,9 +135,11 @@ threshold while "not English" stays certain — a top-1 rule made the tests flak
   differences instead.
 - **`LinearBackward` overwrites `dx`; every other backward adds into it.** The residual streams
   depend on that convention.
-- **The notebook's quirks that are kept:** in-sample calibration (every 15th item), the action head
+- **The notebook's quirks that are kept:** in-sample calibration, the action head
   receiving zero gradient but weight decay, and the item/target construction of `build_training_item`
-  (pinned token for token by `TrainingItemParityTests`). **The ones that are not:** stale
+  (pinned token for token by `TrainingItemParityTests`). **The ones that are not:** the calibration set (`all_items[::15]` over five questions per case
+samples one question position, so only `choice` was ever fitted — a seeded random sample of the
+same size is used), stale
   `temperature_by_options` buckets surviving the fit (they are refitted and replaced), and fitted
   temperatures outside the clamp range (they are clamped to what inference applies).
 
