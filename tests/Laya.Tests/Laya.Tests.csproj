@@ -15,5 +15,6 @@
   </ItemGroup>
   <ItemGroup>
     <ProjectReference Include="../../src/Laya/Laya.csproj" />
+    <ProjectReference Include="../../src/Laya.Catalyst/Laya.Catalyst.csproj" />
   </ItemGroup>
 </Project>

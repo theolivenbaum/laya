@@ -32,7 +32,7 @@ public sealed record LanguageAnalysis(
     public double? ClassifierProbability { get; init; }
 }
 
-/// <summary>The evidence behind <see cref="LanguageDetector.GuessLatinLanguage"/>.</summary>
+/// <summary>The evidence behind <see cref="LanguageDetector.GuessLatinLanguage(string)"/>.</summary>
 public readonly record struct LatinProfile(string? Language, int EnglishHits, double DiacriticRate, bool LooksNonEnglish);
 
 /// <summary>
@@ -304,7 +304,7 @@ public static partial class LanguageDetector
     }
 
     /// <summary>
-    /// The evidence behind the Latin-script language guess. <see cref="Analyse"/> needs it rather
+    /// The evidence behind the Latin-script language guess. <see cref="Analyse(object?)"/> needs it rather
     /// than just the verdict, because "undecided" and "English" are different answers and only one of
     /// them is safe to send to the English checkpoint. A non-English language is only named when it
     /// matched at least one word no other list claims.
@@ -426,12 +426,12 @@ public static partial class LanguageDetector
             var guess = classifier.Classify(text);
             if (guess is not null)
             {
-                bool classifierEnglish = guess.Value.Language == "en";
+                double nonEnglish = 1d - guess.Value.EnglishProbability;
                 analysis = analysis with
                 {
                     ClassifierLanguage = guess.Value.Language,
                     ClassifierProbability = Math.Round(guess.Value.Probability, 4),
-                    IsEnglish = classifierEnglish || guess.Value.Probability < classifier.MinimumProbability,
+                    IsEnglish = guess.Value.Language == "en" || nonEnglish < classifier.MinimumProbability,
                 };
             }
         }

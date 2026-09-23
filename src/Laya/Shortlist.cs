@@ -7,7 +7,7 @@ namespace Laya;
 /// <summary>Maps texts to one embedding row each: <c>[texts.Count][dim]</c>.</summary>
 public delegate float[][] EmbedFunction(IReadOnlyList<string> texts);
 
-/// <summary>What <see cref="Shortlist.PredictShortlist"/> did to one choice question.</summary>
+/// <summary>What <see cref="Shortlist.PredictShortlist(IDecisionEngine, object?, QuestionSet, EmbedFunction, int, ParallelOptions?)"/> did to one choice question.</summary>
 public sealed record ShortlistEntry
 {
     /// <summary>The kept labels, best first — or every label in its original order on a passthrough.</summary>
@@ -35,7 +35,7 @@ public sealed record ShortlistEntry
 /// <c>.reference/laya/shortlist.py</c>.
 ///
 /// <para>Choice options share one <c>head_max_len</c> budget, so a large label set leaves each label
-/// only a few tokens. <see cref="PredictShortlist"/> embeds the state and every option, keeps the
+/// only a few tokens. <see cref="PredictShortlist(IDecisionEngine, object?, QuestionSet, EmbedFunction, int, ParallelOptions?)"/> embeds the state and every option, keeps the
 /// top <c>k</c> by cosine similarity, and runs a single decision pass over the reduced set. The
 /// decision model itself is untouched: it still scores every criterion it is given.</para>
 /// </summary>

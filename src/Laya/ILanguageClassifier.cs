@@ -1,7 +1,12 @@
 namespace Laya;
 
-/// <summary>A classifier's verdict: an ISO 639-1 code (<c>"en"</c>, <c>"id"</c>, ...) and how sure it is.</summary>
-public readonly record struct LanguageGuess(string Language, double Probability);
+/// <summary>
+/// A classifier's verdict: the most likely language as an ISO 639-1 code (<c>"en"</c>, <c>"id"</c>, ...),
+/// its probability, and the probability the classifier gives English. Routing asks "is this not
+/// English?", which a spread over close relatives (Indonesian / Malay / Tagalog) answers firmly even
+/// when no single one of them is a clear winner — hence the third field.
+/// </summary>
+public readonly record struct LanguageGuess(string Language, double Probability, double EnglishProbability);
 
 /// <summary>
 /// A statistical language identifier the <see cref="Router"/> can consult.
@@ -20,7 +25,10 @@ public interface ILanguageClassifier
     /// <summary>The most likely language of <paramref name="text"/>, or null when it cannot tell.</summary>
     LanguageGuess? Classify(string text);
 
-    /// <summary>A non-English verdict below this probability is ignored and the state stays English.</summary>
+    /// <summary>
+    /// The state leaves the English checkpoint only when the classifier gives non-English languages at
+    /// least this much probability in total (<c>1 - EnglishProbability</c>).
+    /// </summary>
     double MinimumProbability => 0.8;
 
     /// <summary>Texts with fewer words than this are not classified at all: short text is where n-gram models guess.</summary>

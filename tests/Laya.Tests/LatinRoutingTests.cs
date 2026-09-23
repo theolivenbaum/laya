@@ -122,14 +122,14 @@ public class LatinRoutingTests
     }
 
     /// <summary>A classifier that always answers the same thing, and counts how often it was asked.</summary>
-    private sealed class FixedClassifier(string language, double probability) : ILanguageClassifier
+    private sealed class FixedClassifier(string language, double probability, double? english = null) : ILanguageClassifier
     {
         public int Calls { get; private set; }
 
         public LanguageGuess? Classify(string text)
         {
             Calls++;
-            return new LanguageGuess(language, probability);
+            return new LanguageGuess(language, probability, english ?? (language == "en" ? probability : 0d));
         }
     }
 
@@ -161,7 +161,9 @@ public class LatinRoutingTests
     public void AnUnsureOrEnglishClassifierKeepsTheStateEnglish()
     {
         const string text = "Saya ditagih dua kali untuk langganan saya bulan ini";
-        Assert.Equal("english", new Router { LanguageClassifier = new FixedClassifier("id", 0.5) }.Route(text).Model);
+        Assert.Equal("english", new Router { LanguageClassifier = new FixedClassifier("id", 0.5, english: 0.4) }.Route(text).Model);
+        // A spread over close relatives is still firmly "not English".
+        Assert.Equal("multilingual", new Router { LanguageClassifier = new FixedClassifier("id", 0.5, english: 0.05) }.Route(text).Model);
         Assert.Equal("english", new Router { LanguageClassifier = new FixedClassifier("en", 0.99) }.Route(text).Model);
     }
 }

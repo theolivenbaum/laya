@@ -1,6 +1,7 @@
 <Solution>
   <Folder Name="/src/">
     <Project Path="src/Laya/Laya.csproj" />
+    <Project Path="src/Laya.Catalyst/Laya.Catalyst.csproj" />
     <Project Path="src/Laya.Cli/Laya.Cli.csproj" />
   </Folder>
   <Folder Name="/benchmarks/">

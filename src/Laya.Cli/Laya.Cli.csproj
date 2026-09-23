@@ -12,6 +12,7 @@
   </PropertyGroup>
   <ItemGroup>
     <ProjectReference Include="../Laya/Laya.csproj" />
+    <ProjectReference Include="../Laya.Catalyst/Laya.Catalyst.csproj" />
   </ItemGroup>
   <ItemGroup>
     <!-- `laya profile` captures a sampling profile and an allocation report of its own process. -->

@@ -90,6 +90,8 @@ internal static class Program
           --cache <path>        Download cache root (default: ~/.cache/laya or $LAYA_HOME)
           --token <token>       Hugging Face token (default: $HF_TOKEN)
           --threads <n>         Kernel threads (default: $LAYA_THREADS, else every core)
+          --lid <name>          route: none | catalyst — a language classifier for text the
+                                built-in heuristic cannot identify (default: none)
 
         EXAMPLES
           laya download --model english --cache ./artifacts/models
@@ -98,6 +100,7 @@ internal static class Program
           laya predict --model-dir ./artifacts/models/english --preset triage \
                        --text "I was charged twice and nobody answers"
           laya route --text "Mein Konto wurde zweimal belastet"
+          laya route --lid catalyst --text "Saya ditagih dua kali untuk langganan saya"
           laya profile --model-dir ./artifacts/models/english --preset triage \
                        --text "…" --threads 1 --no-trace
           laya dump-states --model-dir ./artifacts/models/english \
@@ -133,12 +136,23 @@ internal static class Program
         object? state = ReadState(options);
         var questions = options.Has("preset") || options.Has("question") ? ReadQuestions(options) : null;
         var router = new Router(autoTaskDetection: options.Has("auto-task"),
-            standaloneRepos: options.Has("standalone"));
+            standaloneRepos: options.Has("standalone"))
+        {
+            LanguageClassifier = LanguageClassifier(options),
+        };
         var decision = router.Route(state, questions, options.Value("force-model"), options.Value("task"),
             options.Value("lang"));
         Console.WriteLine(JsonSerializer.Serialize(decision, Json));
         return 0;
     }
+
+    /// <summary><c>--lid catalyst</c> adds a statistical language identifier to routing; the default is none.</summary>
+    private static ILanguageClassifier? LanguageClassifier(CommandLine options) => options.Value("lid") switch
+    {
+        null or "none" or "heuristic" => null,
+        "catalyst" => Laya.Catalyst.CatalystLanguageClassifier.CreateAsync().GetAwaiter().GetResult(),
+        string other => throw new ArgumentException($"unknown --lid '{other}'; expected none or catalyst."),
+    };
 
     private static int ListPresets()
     {
