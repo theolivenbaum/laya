@@ -3,6 +3,7 @@
     <Project Path="src/Laya/Laya.csproj" />
     <Project Path="src/Laya.Catalyst/Laya.Catalyst.csproj" />
     <Project Path="src/Laya.Cli/Laya.Cli.csproj" />
+    <Project Path="src/Laya.Training/Laya.Training.csproj" />
   </Folder>
   <Folder Name="/benchmarks/">
     <Project Path="benchmarks/Laya.Benchmarks/Laya.Benchmarks.csproj" />

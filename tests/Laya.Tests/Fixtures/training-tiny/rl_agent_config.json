@@ -1,0 +1,14 @@
+{
+  "encoder": "tiny",
+  "head_layers": 2,
+  "max_len": 64,
+  "head_max_len": 32,
+  "act_costs": {
+    "escalate": 0.5
+  },
+  "temperature": [
+    1.0,
+    1.0,
+    1.0
+  ]
+}

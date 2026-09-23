@@ -46,6 +46,9 @@ internal static class Program
                 "dump-states" => DumpStates(options),
                 "bench" => Bench(options),
                 "profile" => ProfileCommand.Run(options, OpenAgent, ReadState, ReadQuestions),
+                "dataset" => TrainCommands.Dataset(options),
+                "train" => TrainCommands.Train(options, ModelDirectory),
+                "evaluate" => TrainCommands.Evaluate(options, ModelDirectory),
                 _ => Unknown(args[0]),
             };
         }
@@ -79,6 +82,9 @@ internal static class Program
           dump-states   Write per-layer activations for parity checking
           bench         Time the forward pass
           profile       Stage timings, allocations and a sampling profile of a forward pass
+          dataset       Download a typed-decisions split to JSON lines
+          train         Fine-tune a checkpoint (RLCD objective, AdamW, temperature calibration)
+          evaluate      Score a checkpoint on typed-decisions cases (accuracy, Brier, ECE, ...)
 
         COMMON OPTIONS
           --model <name>        english | multilingual | typed-decisions   (default: english)
@@ -93,6 +99,21 @@ internal static class Program
           --lid <name>          route: none | catalyst — a language classifier for text the
                                 built-in heuristic cannot identify (default: none)
 
+        TRAINING OPTIONS
+          --data <file.jsonl>   Training cases (default: download --dataset's train split)
+          --dataset <id>        Hugging Face dataset (default: LocalLLaMA/typed-decisions)
+          --config <name>       Dataset config (default: all)
+          --out <dir>           Where the fine-tuned checkpoint is written
+          --epochs <n>          (default 4)       --micro-batch <n>   (default 8)
+          --grad-accum <n>      (default 4)       --group-size <n>    (default 4)
+          --lr-encoder <x>      (default 2.5e-5)  --lr-head <x>       (default 1e-4)
+          --train-layers <n>    Train only the top n encoder layers (0 = head only; default all)
+          --max-steps <n>       Stop after n optimizer steps
+          --max-len <n>         Sequence budget for training and the saved config
+          --head-max-len <n>    Instructions + options budget
+          --limit <n>           Use only the first n cases
+          --eval-data <file>    Evaluate the result on these cases (or --eval for the test split)
+
         EXAMPLES
           laya download --model english --cache ./artifacts/models
           laya download --model multilingual --source hub
@@ -103,6 +124,10 @@ internal static class Program
           laya route --lid catalyst --text "Saya ditagih dua kali untuk langganan saya"
           laya profile --model-dir ./artifacts/models/english --preset triage \
                        --text "…" --threads 1 --no-trace
+          laya dataset --split train
+          laya train --model english --data artifacts/data/LocalLLaMA_typed-decisions.all.train.jsonl \
+                     --out artifacts/models/my-typed-decisions --train-layers 4 --eval
+          laya evaluate --model-dir artifacts/models/my-typed-decisions --split test
           laya dump-states --model-dir ./artifacts/models/english \
                            --text "hello" --question noul:"Is this a greeting?" \
                            --out artifacts/dumps/dotnet.json
