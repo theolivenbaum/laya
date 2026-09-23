@@ -57,6 +57,23 @@ Status key: `[ ]` not started · `[~]` in progress · `[x]` done
 - [x] README rewrite for the .NET package
 - [ ] Re-enable CI as a .NET workflow (left disabled per the port brief)
 
+## 7. Upstream sync (NandhaKishorM/laya 0.3.6)
+- [x] `.reference/` refreshed to upstream `c752770`
+- [x] Latin routing: Armenian, unaccented Romance words, Romanian, shared-word rule, undecided ≠ English
+- [x] Router lifecycle lock (#95), temperature clamp (#35), email disclaimer (#94), shortlist (#106)
+- [x] `ILanguageClassifier` + `Laya.Catalyst` for the plain-ASCII languages the heuristic cannot see
+
+## 8. Training (`Laya.Training`)
+- [x] Backward pass for every layer, checkpointed; gradients match PyTorch autograd (tiny model and
+      the real English checkpoint)
+- [x] RLCD objective, AdamW, cosine schedule, clipping, temperature calibration (types and buckets)
+- [x] typed-decisions loader + datasets-server download; notebook evaluation metrics
+- [x] `laya dataset` / `train` / `evaluate`
+- [ ] Reuse activation buffers across layers: every layer allocates its tape afresh, and page-faulting
+      those arrays is a third of the process's CPU time (`sys` ≈ 0.5 × `user` on a full fine-tune)
+- [ ] Save optimizer state with the rolling checkpoint so a run can resume (the notebook cannot either)
+- [ ] Data parallelism across processes, the notebook's DDP
+
 ## Performance work
 - [x] Concatenated-batch forward pass — the weights are streamed once per call, not once per question
 - [x] Panel-packed weights + broadcast GEMM kernel
@@ -102,5 +119,5 @@ against PyTorch is not reachable in fp32 on this hardware.
   .NET 10 SDK, and writing intrinsics that could not be compiled or measured here would be a parity
   risk. `SimdOps.Capabilities` reports which target framework is actually running.
 - GPU execution is out of scope; this port is CPU/SIMD only.
-- Training (`proper_reward`, `td_lambda_targets`) is ported for completeness but there is no
-  training loop, matching the Python package.
+- Training lives in `Laya.Training`, a separate package, as the notebook lives outside the Python
+  package. It runs fp32 on the CPU where the notebook ran fp16 autocast on two GPUs.

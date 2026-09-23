@@ -16,7 +16,9 @@ is right unless there is a written note here saying otherwise.
 ```
 .reference/            original Python package, tests, notebook, packaging (read-only spec)
 src/Laya/              the port: numerics, tokenizer, ModernBERT, decision head, runtime
-src/Laya.Cli/          `laya` command line tool (predict, route, download, dump, bench)
+src/Laya.Catalyst/     optional statistical language identifier for the router (Catalyst)
+src/Laya.Training/     fine-tuning: backward pass, RLCD objective, AdamW, calibration, dataset
+src/Laya.Cli/          `laya` command line tool (predict, route, download, dump, bench, train, evaluate)
 tests/Laya.Tests/      xunit tests, including parity tests against dumped PyTorch tensors
 tools/                 Python helper scripts used only to produce reference dumps
 artifacts/             (gitignored) downloaded models and reference dumps
@@ -24,7 +26,7 @@ artifacts/             (gitignored) downloaded models and reference dumps
 
 ## Packaging
 
-One package, `Laya`, published on every push to `main` with a CalVer version by the Azure
+Three packages, `Laya`, `Laya.Catalyst` and `Laya.Training`, published on every push to `main` with a CalVer version by the Azure
 DevOps pipeline in `.devops/azure-pipelines.yml` (`GeneratePackageOnBuild`, then
 `NuGetCommand@2` push through the `nuget-curiosity-org` service connection). **No model data is packaged.** `RemoteCheckpoint` downloads a
 checkpoint's five files on demand from `https://models.curiosity.ai/laya/`, laid out as
@@ -106,6 +108,38 @@ post-processor never runs; special ids come from `tokenizer_config.json`.
   `Laya.Numerics`.
 - Public API names mirror the Python: `Agent`, `Router`, `RouteDecision`, `Presets`,
   `LanguageDetector`, `EmailUtils`. Method names are PascalCase (`SystemOne`, `Predict`).
+
+## Routing: the heuristic, and the classifier behind it
+
+`LanguageDetector` follows upstream `lang.py` exactly; `Router` with no `LanguageClassifier` routes
+exactly as the Python does, and `LatinRoutingTests` pins it. The one C#-only addition is
+`ILanguageClassifier` (`Laya.Catalyst` implements it), and its contract is narrow on purpose: it is
+consulted only when the heuristic left a Latin-script state undecided *and* would route it English,
+and only for at least `MinimumWords` words. It can move a state to multilingual, never an identified
+one away from it. The decision reads `1 − P(en)`, not the top language's probability: Catalyst
+splits Indonesian between Indonesian, Malay and Tagalog, so the top-1 probability dips under any
+threshold while "not English" stays certain — a top-1 rule made the tests flake one run in three.
+
+## Training
+
+`Laya.Training` ports the fine-tuning notebook. Parity rules apply to it as to inference:
+
+- **Gradients are checked against autograd, not reasoned about.** `tools/dump_training_reference.py`
+  builds the reference `DecisionModel` on a tiny random ModernBERT (window shorter than the
+  sequences, both head layers) and dumps every gradient; with `--checkpoint` it does a tensor subset
+  of a real checkpoint. `TrainingGradientTests` compares them. Any change to a backward pass has to
+  keep both at their current ~1e-6 / ~1e-5 relative error.
+- **Dropout masks are a function of (seed, index)** (`Ops.Uniform`), because layers are
+  checkpointed: the backward pass recomputes the forward, and a stateful RNG would draw different
+  masks the second time. PyTorch draws its own, so the dropout path is checked by finite
+  differences instead.
+- **`LinearBackward` overwrites `dx`; every other backward adds into it.** The residual streams
+  depend on that convention.
+- **The notebook's quirks that are kept:** in-sample calibration (every 15th item), the action head
+  receiving zero gradient but weight decay, and the item/target construction of `build_training_item`
+  (pinned token for token by `TrainingItemParityTests`). **The ones that are not:** stale
+  `temperature_by_options` buckets surviving the fit (they are refitted and replaced), and fitted
+  temperatures outside the clamp range (they are clamped to what inference applies).
 
 ## Target frameworks
 

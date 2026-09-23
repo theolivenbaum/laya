@@ -34,6 +34,18 @@ public class AgentTests(ITestOutputHelper output)
     }
 
     [ModelFact]
+    public void ASingleOptionChoiceIsFullyDecided()
+    {
+        // Upstream #103: topk(2) over one option raised. The answer is well defined — softmax over one
+        // logit is 1 — and the action head sees top1 − top2 = 1, as for any unambiguous gap.
+        using var agent = Agent.FromDirectory(TestModels.CheckpointDirectory("english"));
+        var result = agent.SystemOne("I was charged twice", new QuestionSet().Add("only", Question.Choice("Which team?", "billing")));
+        Assert.Equal("billing", result["only"].Choice);
+        Assert.Equal(1d, result["only"].ProbabilityOf("billing"));
+        Assert.InRange(result["only"].Action.ActProbability, 0d, 1d);
+    }
+
+    [ModelFact]
     public void TheShippedElevenPlusBucketIsClamped()
     {
         using var agent = Agent.FromDirectory(TestModels.CheckpointDirectory("english"));
