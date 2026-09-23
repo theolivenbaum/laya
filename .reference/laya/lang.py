@@ -17,6 +17,7 @@ from typing import Dict, List, Optional, Union
 _SCRIPT_RANGES = [
     ("greek", ((0x0370, 0x03FF), (0x1F00, 0x1FFF))),
     ("cyrillic", ((0x0400, 0x052F), (0x2DE0, 0x2DFF), (0xA640, 0xA69F))),
+    ("armenian", ((0x0530, 0x058F),)),
     ("hebrew", ((0x0590, 0x05FF),)),
     ("arabic", ((0x0600, 0x06FF), (0x0750, 0x077F), (0x08A0, 0x08FF), (0xFB50, 0xFDFF), (0xFE70, 0xFEFF))),
     ("devanagari", ((0x0900, 0x097F), (0xA8E0, 0xA8FF))),
@@ -43,24 +44,87 @@ _SCRIPT_RANGES = [
 
 # Function words. Latin-script languages overlap heavily (de/la/le/un/e/que), so each hit is
 # weighted and a margin is required before calling something non-English.
+#
+# The Romance lists (fr/es/pt/it) deliberately carry the *unaccented* function words as well as the
+# accented ones. A state that lost its accents -- mail clients, ticket systems and any pipeline that
+# normalises to ASCII strip them -- keeps no diacritic rate for the non-English signal to read, so
+# `la`, `un`, `y`, `e`, `et`, `deux` and friends are the only evidence left. With a list of mostly
+# accented words such a state produced one hit or none, fell under the two-hit margin below, and was
+# handed to the English checkpoint as undecided-but-not-non-English text (see #172 and #54).
 _STOP = {
     "en": {"the", "and", "is", "are", "was", "were", "to", "of", "in", "for", "with", "that",
            "this", "it", "you", "have", "has", "not", "but", "on", "at", "be", "as", "from",
            "will", "can", "would", "there", "their", "what", "which", "please", "we", "i"},
     "fr": {"le", "la", "les", "des", "une", "est", "pour", "dans", "que", "qui", "avec", "sur",
-           "pas", "plus", "nous", "vous", "être", "cette", "mais", "sont", "ont", "aux", "ce"},
+           "pas", "plus", "nous", "vous", "être", "cette", "mais", "sont", "ont", "aux", "ce",
+           "et", "du", "au", "ou", "je", "tu", "il", "elle", "ils", "elles", "mon", "ton",
+           "ma", "ta", "sa", "mes", "tes", "ses", "ces", "deux", "trois", "très", "bien",
+           "tout", "tous", "toute", "fait", "veux", "veut", "peux", "peut", "dois", "doit",
+           "merci", "bonjour", "jour", "jours", "mois", "fois", "quand", "comment", "pourquoi",
+           "alors", "donc"},
     "de": {"der", "die", "das", "und", "ist", "ein", "eine", "den", "dem", "nicht", "mit", "für",
            "auf", "von", "zu", "sich", "auch", "werden", "wurde", "haben", "sind", "oder", "aber"},
     "es": {"el", "los", "las", "que", "por", "con", "para", "una", "es", "se", "del", "como",
-           "pero", "son", "está", "este", "esta", "todo", "más", "muy", "hay", "sus"},
+           "pero", "son", "está", "este", "esta", "todo", "más", "muy", "hay", "sus",
+           # `de`/`en` are Spanish too, but they are common English tokens as well (`de facto`,
+           # `en-US`, `en route`, `Rio de Janeiro`), and a state of those alone already carries
+           # no English function word for the margin below to weigh them against, so they stay out.
+           "la", "un", "y", "al", "lo", "le", "les", "su", "mi", "tu", "nos",
+           "ni", "dos", "tres", "fue", "fueron", "ser", "tiene", "tienen", "tengo", "puede",
+           "pueden", "quiero", "necesito", "hemos", "han", "sobre", "entre", "cuando", "donde",
+           "porque", "aunque", "también", "ya", "eso", "esto", "esa", "ese", "nada", "algo",
+           "aquí", "hoy", "gracias"},
     "pt": {"os", "as", "que", "em", "um", "uma", "para", "com", "não", "é", "se", "do", "da",
-           "dos", "das", "mas", "são", "está", "este", "esta", "muito", "pelo", "pela"},
+           "dos", "das", "mas", "são", "está", "este", "esta", "muito", "pelo", "pela",
+           # `no` is Portuguese too, and among the most frequent words it has; it is also one of the
+           # most frequent English words, so it stays out and short Portuguese states that lean on it
+           # alone are left to the diacritic rate, as before.
+           "o", "e", "na", "nas", "nos", "ao", "aos", "por", "foi", "era", "ser", "sou",
+           "tem", "tenho", "pode", "podem", "quero", "preciso", "eu", "meu", "minha", "seu",
+           "sua", "isso", "isto", "aqui", "ali", "como", "quando", "onde", "porque", "mais",
+           "já", "ainda", "agora", "hoje", "ontem", "dois", "três", "tudo", "nada", "obrigado",
+           "olá"},
     "it": {"il", "lo", "gli", "che", "di", "per", "con", "non", "è", "si", "del", "della", "sono",
-           "questo", "questa", "anche", "come", "più", "sono", "nella", "alla"},
+           "questo", "questa", "anche", "come", "più", "sono", "nella", "alla",
+           "la", "le", "un", "uno", "una", "e", "ed", "o", "da", "su", "tra", "fra", "mi",
+           "ci", "ne", "ho", "hai", "ha", "abbiamo", "avete", "hanno", "era", "stato", "stata",
+           "devo", "deve", "devono", "voglio", "vorrei", "mio", "mia", "tuo", "sua", "quando",
+           "dove", "perche", "molto", "poco", "sempre", "mai", "già", "ancora", "adesso", "oggi",
+           "ieri", "grazie", "ciao", "scusa",
+           # the articulated prepositions: Italian-only words, which is what lets a state made of
+           # shared articles (`la fattura`) still name the language rather than stay undecided
+           "nel", "nell", "negli", "sul", "sulla", "sulle", "dal", "dalla", "dallo", "dagli", "dei",
+           "delle", "dello", "degli", "agli", "alle", "col"},
     "nl": {"het", "een", "van", "is", "op", "te", "dat", "niet", "met", "voor", "zijn", "aan",
            "door", "maar", "ook", "worden", "deze", "naar", "wordt"},
+    # Romanian words that its Romance neighbours do not share, so adding `ro` cannot steal a
+    # French/Spanish/Italian/Portuguese state: `la`, `o`, `un`, `de`, `pe`, `ca` are deliberately
+    # left out for that reason, and the diacritic signal below carries the rest.
+    "ro": {"și", "să", "este", "sunt", "care", "pentru", "din", "dar", "după", "până", "fără",
+           "ale", "lui", "în", "fost", "acum", "vreau", "trebuie", "foarte", "acest", "această",
+           "acesta", "aceasta", "mi", "ți", "vă", "nu"},
 }
-_NON_EN_DIACRITICS = set("àâäãáåçéèêëíìîïñóòôöõøúùûüýÿßæœđłşţğıåäö")
+# Letters that ordinary English does not use. This is the signal that catches a Latin-script
+# language we hold no stopwords for at all (Romanian, Polish, Czech, Turkish, Baltic, ...),
+# which is the difference between routing it to the multilingual checkpoint and silently
+# handing it to the English one.
+_NON_EN_DIACRITICS = set(
+    "àâäãáåçéèêëíìîïñóòôöõøúùûüýÿßæœ"          # Western European
+    "ăâîșțşţ"                                   # Romanian
+    "ąćęłńśźż"                                  # Polish
+    "čďěňřšťůž"                                 # Czech / Slovak
+    "őű"                                        # Hungarian
+    "ğı"                                        # Turkish (text is lowercased before matching)
+    "āēģīķļņūž"                                 # Baltic
+    "đ"                                         # Serbo-Croatian / Vietnamese
+)
+# Words that more than one list claims. `la`, `un`, `e`, `que`, `una` and friends are function words
+# of several of these languages at once, so matching one says "not English" without saying *which*
+# language: a shared word may not name a winner by itself (Romanian text was reported as French that
+# way), though it still counts toward the total of a language that also matched a word of its own.
+_SHARED_WORDS = {w for w in {word for words in _STOP.values() for word in words}
+                 if sum(w in words for words in _STOP.values()) > 1}
+
 _WORD = re.compile(r"[^\W\d_]+", re.UNICODE)
 
 
@@ -130,30 +194,65 @@ def script_profile(text: str) -> Dict[str, float]:
     return {k: v / total for k, v in counts.items() if v}
 
 
-def guess_latin_language(text: str) -> Optional[str]:
-    """Best-effort language code for Latin-script text, or None when undecided.
+# A diacritic rate above this is taken as evidence the text is not English, even when no
+# stopword list matches it.
+NON_EN_DIACRITIC_RATE = 0.02
 
-    Scores function-word hits per language and requires the winner to beat English by a margin,
-    so ordinary English is never misrouted. Short inputs usually return None on purpose.
+
+def latin_profile(text: str) -> Dict[str, object]:
+    """Evidence behind the Latin-script language guess.
+
+    Returns `language` (may be None when undecided), `english_hits`, `diacritic_rate` and
+    `looks_non_english`. `analyse` needs the evidence and not just the verdict, because
+    "undecided" and "English" are different answers and only one of them is safe to send to the
+    English checkpoint.
+
+    A non-English language is only named when it matched at least one word that no other list
+    claims: shared function words alone (`la`, `e`, `o`) identify no particular language.
     """
     words = [w.lower() for w in _WORD.findall(text)]
-    if len(words) < 4:
-        return None
-    scores = {lg: sum(1 for w in words if w in sw) for lg, sw in _STOP.items()}
     lowered = text.lower()
     diac = sum(1 for ch in lowered if ch in _NON_EN_DIACRITICS)
     diac_rate = diac / max(1, len(lowered))
+    non_english = diac_rate >= NON_EN_DIACRITIC_RATE
+    if len(words) < 4:
+        return {"language": None, "english_hits": 0, "diacritic_rate": diac_rate,
+                "looks_non_english": non_english}
+
+    scores = {lg: sum(1 for w in words if w in sw) for lg, sw in _STOP.items()}
     en = scores.get("en", 0)
-    best_lg, best = max(((lg, s) for lg, s in scores.items() if lg != "en"),
-                        key=lambda kv: kv[1], default=(None, 0))
-    if best == 0 and diac_rate < 0.02:
-        return "en" if en else None
-    # a non-English language needs a clear margin over English function words
+    # Only a language that matched at least one word no other list claims may be named. Without
+    # that condition the top score can be pure overlap -- `la` and `e` in Romanian text made
+    # Italian the winner -- which is a guess dressed as a detection. Such a language is dropped
+    # from the running rather than merely losing the tie, so a lesser score with real evidence
+    # still gets named, and the text stays undecided when no list has any.
+    evidenced = {lg: s for lg, s in scores.items()
+                 if lg != "en" and any(w not in _SHARED_WORDS for w in set(words) & _STOP[lg])}
+    best_lg, best = max(evidenced.items(), key=lambda kv: kv[1], default=(None, 0))
+
+    lang = None
     if best_lg and best >= max(2, en + 2):
-        return best_lg
-    if diac_rate >= 0.04 and best_lg and best >= en:
-        return best_lg
-    return "en" if en else None
+        # a non-English language needs a clear margin over English function words
+        lang = best_lg
+    elif best_lg and non_english and best >= max(2, en):
+        # Needs two hits here too. One shared function word ("para" in Turkish text) named Spanish
+        # on the strength of the diacritics alone, which is a guess dressed as a detection.
+        lang = best_lg
+    elif en and not non_english:
+        lang = "en"
+    return {"language": lang, "english_hits": en, "diacritic_rate": diac_rate,
+            "looks_non_english": non_english}
+
+
+def guess_latin_language(text: str) -> Optional[str]:
+    """Best-effort language code for Latin-script text, or None when undecided.
+
+    Scores function-word hits per language and requires the winner to beat English by a margin and
+    to have matched at least one word of its own, so ordinary English is never misrouted and a
+    word of several languages at once names none of them. Short inputs usually return None on
+    purpose.
+    """
+    return latin_profile(text)["language"]
 
 
 def analyse(state: Union[str, dict, list, None]) -> Dict[str, object]:
@@ -168,13 +267,24 @@ def analyse(state: Union[str, dict, list, None]) -> Dict[str, object]:
     non_latin = round(1.0 - prof.get("latin", 0.0), 4) if prof else 0.0
     if script == "unknown":
         return {"script": "unknown", "script_profile": prof, "language": None,
-                "is_english": True, "non_latin_fraction": 0.0}
+                "is_english": True, "language_undecided": True, "diacritic_rate": 0.0,
+                "non_latin_fraction": 0.0}
     if script != "latin":
         return {"script": script, "script_profile": prof, "language": None,
-                "is_english": False, "non_latin_fraction": non_latin}
-    lang = guess_latin_language(text)
+                "is_english": False, "language_undecided": True, "diacritic_rate": 0.0,
+                "non_latin_fraction": non_latin}
+    prof_lat = latin_profile(text)
+    lang = prof_lat["language"]
+    # Undecided is not English. Treating it as English sent every Latin-script language we hold no
+    # stopwords for to the checkpoint that cannot read it, silently. When nothing identifies the
+    # language, non-English letters are enough to prefer the multilingual checkpoint; text with no
+    # such letters (including short English) still goes to the English one.
+    undecided = lang is None
+    english = lang == "en" or (undecided and not prof_lat["looks_non_english"])
     return {"script": "latin", "script_profile": prof, "language": lang,
-            "is_english": lang in (None, "en"), "non_latin_fraction": non_latin}
+            "is_english": english, "language_undecided": undecided,
+            "diacritic_rate": round(float(prof_lat["diacritic_rate"]), 4),
+            "non_latin_fraction": non_latin}
 
 
 def is_english(state: Union[str, dict, list, None]) -> bool:

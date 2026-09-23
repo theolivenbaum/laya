@@ -1,0 +1,20 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework Condition="'$(LayaEnableNet11)' != 'true'">net10.0</TargetFramework>
+    <TargetFrameworks Condition="'$(LayaEnableNet11)' == 'true'">$(LayaTargetFrameworks)</TargetFrameworks>
+    <RootNamespace>Laya.Catalyst</RootNamespace>
+    <AssemblyName>Laya.Catalyst</AssemblyName>
+    <IsPackable>true</IsPackable>
+    <PackageId>Laya.Catalyst</PackageId>
+    <Description>Statistical language identification for Laya's router, backed by Catalyst's language detector.</Description>
+    <PackageTags>$(PackageTags);language-detection;catalyst</PackageTags>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="../Laya/Laya.csproj" />
+  </ItemGroup>
+  <ItemGroup>
+    <!-- The detector's model is an embedded resource of the Catalyst package itself: nothing is
+         downloaded at run time. It is a separate package because Catalyst brings Microsoft.ML with it. -->
+    <PackageReference Include="Catalyst" Version="26.9.5421" />
+  </ItemGroup>
+</Project>

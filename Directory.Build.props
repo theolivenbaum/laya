@@ -24,7 +24,7 @@
 
     <!-- CI stamps a CalVer version (-p:Version=yy.M.<run>) across every package in a run; this
          is what a local `dotnet pack` produces instead. -->
-    <Version>0.3.3</Version>
+    <Version>0.3.6</Version>
     <IsPackable>false</IsPackable>
   </PropertyGroup>
 

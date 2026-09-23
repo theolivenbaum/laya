@@ -272,3 +272,48 @@ public class RouterTests
         Assert.Equal("/tmp/ml", router.Route(new Dictionary<string, object?> { ["m"] = "मुझसे दो बार" }, Generic()).Repo);
     }
 }
+
+/// <summary>Model lifecycle under concurrency (upstream #95).</summary>
+public class RouterConcurrencyTests
+{
+    private sealed class SlowEngine : IDecisionEngine
+    {
+        public SlowEngine() => Thread.Sleep(50);    // widen the check-then-build window
+
+        public DecisionResult SystemOne(object? state, QuestionSet questions)
+            => new() { Model = "slow", Answers = [], Usage = new Usage(0, 0) };
+
+        public void Dispose() { }
+    }
+
+    [Fact]
+    public void ConcurrentLoadsShareOneEngine()
+    {
+        int built = 0;
+        var router = new Router
+        {
+            EngineFactory = (_, _) =>
+            {
+                Interlocked.Increment(ref built);
+                return new SlowEngine();
+            },
+        };
+
+        var engines = new IDecisionEngine[8];
+        Parallel.For(0, engines.Length, new ParallelOptions { MaxDegreeOfParallelism = 8 },
+            i => engines[i] = router.Load("english"));
+
+        Assert.Single(engines.Distinct());
+        Assert.Equal(1, built);
+        Assert.Equal(["english"], router.Loaded);
+    }
+
+    [Fact]
+    public void HotPathLoadsKeepTheLruConsistent()
+    {
+        var router = new Router(maxLoaded: 3) { EngineFactory = (_, _) => new SlowEngine() };
+        router.Load("english");
+        Parallel.For(0, 20, _ => router.Load("en"));
+        Assert.Equal(["english"], router.Loaded);
+    }
+}

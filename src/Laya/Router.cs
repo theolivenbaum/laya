@@ -95,6 +95,10 @@ public sealed class Router : IDisposable
     private readonly string? _token;
     private readonly string? _cacheRoot;
 
+    // Guards the model lifecycle (load, evict, attach, preload, unload) and the LRU bookkeeping.
+    // Inference is deliberately outside it, so concurrent predictions share a checkpoint without
+    // serialising; a load holds it while building, so concurrent first calls build one agent, not eight.
+    private readonly Lock _gate = new();
     private int _maxLoaded = 1;
 
     /// <summary>
@@ -107,8 +111,11 @@ public sealed class Router : IDisposable
         get => _maxLoaded;
         set
         {
-            _maxLoaded = Math.Max(1, value);
-            Evict();
+            lock (_gate)
+            {
+                _maxLoaded = Math.Max(1, value);
+                Evict();
+            }
         }
     }
     public string Default { get; }
@@ -120,6 +127,13 @@ public sealed class Router : IDisposable
     /// tests substitute a stub so the LRU can be exercised without any weights.
     /// </summary>
     public Func<string, ModelSpec, IDecisionEngine>? EngineFactory { get; init; }
+
+    /// <summary>
+    /// A statistical language identifier consulted when the built-in heuristic cannot name a
+    /// Latin-script language (see <see cref="ILanguageClassifier"/>). Null keeps routing exactly as
+    /// the Python package does it.
+    /// </summary>
+    public ILanguageClassifier? LanguageClassifier { get; init; }
 
     public Router(IEnumerable<KeyValuePair<string, ModelSpec>>? models = null, string? token = null,
         int maxLoaded = 1, string @default = "english", bool autoTaskDetection = false,
@@ -167,26 +181,36 @@ public sealed class Router : IDisposable
         return null;
     }
 
-    public IReadOnlyList<string> Loaded => _order;
+    /// <summary>The resident checkpoints, least recently used first. A snapshot, safe to enumerate.</summary>
+    public IReadOnlyList<string> Loaded
+    {
+        get
+        {
+            lock (_gate) return [.. _order];
+        }
+    }
 
     /// <summary>Returns the engine for a checkpoint, downloading and building it on first use.</summary>
     public IDecisionEngine Load(string name)
     {
         string key = Normalise(name);
-        if (_agents.TryGetValue(key, out var existing))
+        lock (_gate)
         {
-            Touch(key);
-            return existing;
-        }
+            if (_agents.TryGetValue(key, out var existing))
+            {
+                Touch(key);
+                return existing;
+            }
 
-        var spec = _models[key];
-        var agent = EngineFactory is not null
-            ? EngineFactory(key, spec)
-            : Agent.Load(spec.Repo, spec.Subfolder, _token, _cacheRoot, DownloadProgress);
-        _agents[key] = agent;
-        _order.Add(key);
-        Evict();
-        return agent;
+            var spec = _models[key];
+            var agent = EngineFactory is not null
+                ? EngineFactory(key, spec)
+                : Agent.Load(spec.Repo, spec.Subfolder, _token, _cacheRoot, DownloadProgress);
+            _agents[key] = agent;
+            _order.Add(key);
+            Evict();
+            return agent;
+        }
     }
 
     private void Touch(string key)
@@ -212,11 +236,18 @@ public sealed class Router : IDisposable
     public IDecisionEngine Attach(string name, IDecisionEngine agent)
     {
         string key = Normalise(name);
-        _agents[key] = agent;
-        _attached.Add(key);
-        Touch(key);
-        MaxLoaded = Math.Max(MaxLoaded, _agents.Count);
-        return agent;
+        lock (_gate)
+        {
+            if (_agents.Remove(key, out var previous) && !_attached.Contains(key) && !ReferenceEquals(previous, agent))
+            {
+                previous.Dispose();
+            }
+            _agents[key] = agent;
+            _attached.Add(key);
+            Touch(key);
+            MaxLoaded = Math.Max(MaxLoaded, _agents.Count);
+            return agent;
+        }
     }
 
     /// <summary>
@@ -227,10 +258,13 @@ public sealed class Router : IDisposable
     public Router Preload(IEnumerable<string>? names = null)
     {
         var wanted = (names ?? _models.Keys).Select(Normalise).ToList();
-        MaxLoaded = Math.Max(MaxLoaded, Math.Max(wanted.Count, _agents.Count));
-        foreach (string name in wanted)
+        lock (_gate)
         {
-            if (!_agents.ContainsKey(name)) Load(name);
+            MaxLoaded = Math.Max(MaxLoaded, Math.Max(wanted.Count, _agents.Count));
+            foreach (string name in wanted)
+            {
+                if (!_agents.ContainsKey(name)) Load(name);
+            }
         }
         return this;
     }
@@ -238,21 +272,24 @@ public sealed class Router : IDisposable
     /// <summary>Frees one checkpoint, or all of them.</summary>
     public void Unload(string? name = null)
     {
-        if (name is null)
+        string? normalised = name is null ? null : Normalise(name);
+        lock (_gate)
         {
-            foreach (var (key, agent) in _agents)
+            if (normalised is null)
             {
-                if (!_attached.Contains(key)) agent.Dispose();
+                foreach (var (key, agent) in _agents)
+                {
+                    if (!_attached.Contains(key)) agent.Dispose();
+                }
+                _agents.Clear();
+                _order.Clear();
+                _attached.Clear();
+                return;
             }
-            _agents.Clear();
-            _order.Clear();
-            _attached.Clear();
-            return;
-        }
 
-        string normalised = Normalise(name);
-        if (_agents.Remove(normalised, out var loaded) && !_attached.Remove(normalised)) loaded.Dispose();
-        _order.Remove(normalised);
+            if (_agents.Remove(normalised, out var loaded) && !_attached.Remove(normalised)) loaded.Dispose();
+            _order.Remove(normalised);
+        }
     }
 
     /// <summary>
@@ -302,7 +339,7 @@ public sealed class Router : IDisposable
             };
         }
 
-        var detection = LanguageDetector.Analyse(state);
+        var detection = LanguageDetector.Analyse(state, LanguageClassifier);
         string chosen;
         string reason;
         if (detection.Script == "unknown")
@@ -320,7 +357,23 @@ public sealed class Router : IDisposable
         else if (!detection.IsEnglish)
         {
             chosen = "multilingual";
-            reason = $"Latin script but language looks like '{detection.Language}', not English";
+            if (detection.Language is not null)
+            {
+                reason = $"Latin script but language looks like '{detection.Language}', not English";
+            }
+            else if (detection.ClassifierLanguage is not null && detection.ClassifierLanguage != "en")
+            {
+                reason = string.Format(CultureInfo.InvariantCulture,
+                    "Latin script, no stopword evidence, but the language classifier says '{0}' (p={1:F2}); " +
+                    "not safe for the English checkpoint", detection.ClassifierLanguage, detection.ClassifierProbability);
+            }
+            else
+            {
+                // Unidentified Latin-script language: routed on the non-English letters alone.
+                reason = string.Format(CultureInfo.InvariantCulture,
+                    "Latin script, language not identified but {0:F0}% non-English letters; " +
+                    "not safe for the English checkpoint", 100 * detection.DiacriticRate);
+            }
         }
         else
         {

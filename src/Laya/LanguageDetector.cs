@@ -6,15 +6,34 @@ using System.Text.RegularExpressions;
 namespace Laya;
 
 /// <summary>
-/// What <see cref="LanguageDetector.Analyse"/> found in a state. The JSON names match the Python
-/// payload, because a routing decision is serialized straight into API responses.
+/// What <see cref="LanguageDetector.Analyse(object?)"/> found in a state. The JSON names match the
+/// Python payload, because a routing decision is serialized straight into API responses.
 /// </summary>
+/// <param name="LanguageUndecided">
+/// True when no language could be identified. Undecided is not English: it is reported separately
+/// so a caller can tell "this is English" from "nothing here says what this is".
+/// </param>
 public sealed record LanguageAnalysis(
     [property: JsonPropertyName("script")] string Script,
     [property: JsonPropertyName("script_profile")] IReadOnlyDictionary<string, double> ScriptProfile,
     [property: JsonPropertyName("language")] string? Language,
     [property: JsonPropertyName("is_english")] bool IsEnglish,
-    [property: JsonPropertyName("non_latin_fraction")] double NonLatinFraction);
+    [property: JsonPropertyName("language_undecided")] bool LanguageUndecided,
+    [property: JsonPropertyName("diacritic_rate")] double DiacriticRate,
+    [property: JsonPropertyName("non_latin_fraction")] double NonLatinFraction)
+{
+    /// <summary>What an <see cref="ILanguageClassifier"/> said, when one was consulted.</summary>
+    [JsonPropertyName("classifier_language")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? ClassifierLanguage { get; init; }
+
+    [JsonPropertyName("classifier_probability")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public double? ClassifierProbability { get; init; }
+}
+
+/// <summary>The evidence behind <see cref="LanguageDetector.GuessLatinLanguage(string)"/>.</summary>
+public readonly record struct LatinProfile(string? Language, int EnglishHits, double DiacriticRate, bool LooksNonEnglish);
 
 /// <summary>
 /// Dependency-free language and script detection, used to route between checkpoints.
@@ -32,6 +51,7 @@ public static partial class LanguageDetector
     [
         ("greek", [(0x0370, 0x03FF), (0x1F00, 0x1FFF)]),
         ("cyrillic", [(0x0400, 0x052F), (0x2DE0, 0x2DFF), (0xA640, 0xA69F)]),
+        ("armenian", [(0x0530, 0x058F)]),
         ("hebrew", [(0x0590, 0x05FF)]),
         ("arabic", [(0x0600, 0x06FF), (0x0750, 0x077F), (0x08A0, 0x08FF), (0xFB50, 0xFDFF), (0xFE70, 0xFEFF)]),
         ("devanagari", [(0x0900, 0x097F), (0xA8E0, 0xA8FF)]),
@@ -58,27 +78,89 @@ public static partial class LanguageDetector
 
     // Function words. Latin-script languages overlap heavily (de/la/le/un/e/que), so each hit is
     // weighted and a margin is required before calling something non-English.
-    private static readonly Dictionary<string, HashSet<string>> StopWords = new(StringComparer.Ordinal)
-    {
-        ["en"] = Set("the", "and", "is", "are", "was", "were", "to", "of", "in", "for", "with", "that",
+    //
+    // The Romance lists carry the *unaccented* function words as well as the accented ones: a state
+    // that lost its accents (mail clients and ticket systems strip them) keeps no diacritic rate, so
+    // `la`, `un`, `y`, `e`, `et` are the only evidence left. Kept in the Python's order, because a tie
+    // between two languages goes to the one listed first.
+    private static readonly (string Language, HashSet<string> Words)[] StopWords =
+    [
+        ("en", Set("the", "and", "is", "are", "was", "were", "to", "of", "in", "for", "with", "that",
             "this", "it", "you", "have", "has", "not", "but", "on", "at", "be", "as", "from",
-            "will", "can", "would", "there", "their", "what", "which", "please", "we", "i"),
-        ["fr"] = Set("le", "la", "les", "des", "une", "est", "pour", "dans", "que", "qui", "avec", "sur",
-            "pas", "plus", "nous", "vous", "être", "cette", "mais", "sont", "ont", "aux", "ce"),
-        ["de"] = Set("der", "die", "das", "und", "ist", "ein", "eine", "den", "dem", "nicht", "mit", "für",
-            "auf", "von", "zu", "sich", "auch", "werden", "wurde", "haben", "sind", "oder", "aber"),
-        ["es"] = Set("el", "los", "las", "que", "por", "con", "para", "una", "es", "se", "del", "como",
-            "pero", "son", "está", "este", "esta", "todo", "más", "muy", "hay", "sus"),
-        ["pt"] = Set("os", "as", "que", "em", "um", "uma", "para", "com", "não", "é", "se", "do", "da",
-            "dos", "das", "mas", "são", "está", "este", "esta", "muito", "pelo", "pela"),
-        ["it"] = Set("il", "lo", "gli", "che", "di", "per", "con", "non", "è", "si", "del", "della", "sono",
-            "questo", "questa", "anche", "come", "più", "nella", "alla"),
-        ["nl"] = Set("het", "een", "van", "is", "op", "te", "dat", "niet", "met", "voor", "zijn", "aan",
-            "door", "maar", "ook", "worden", "deze", "naar", "wordt"),
-    };
+            "will", "can", "would", "there", "their", "what", "which", "please", "we", "i")),
+        ("fr", Set("le", "la", "les", "des", "une", "est", "pour", "dans", "que", "qui", "avec", "sur",
+            "pas", "plus", "nous", "vous", "être", "cette", "mais", "sont", "ont", "aux", "ce",
+            "et", "du", "au", "ou", "je", "tu", "il", "elle", "ils", "elles", "mon", "ton",
+            "ma", "ta", "sa", "mes", "tes", "ses", "ces", "deux", "trois", "très", "bien",
+            "tout", "tous", "toute", "fait", "veux", "veut", "peux", "peut", "dois", "doit",
+            "merci", "bonjour", "jour", "jours", "mois", "fois", "quand", "comment", "pourquoi",
+            "alors", "donc")),
+        ("de", Set("der", "die", "das", "und", "ist", "ein", "eine", "den", "dem", "nicht", "mit", "für",
+            "auf", "von", "zu", "sich", "auch", "werden", "wurde", "haben", "sind", "oder", "aber")),
+        // `de`/`en` are Spanish too, but also common English tokens (`de facto`, `en route`), so they stay out.
+        ("es", Set("el", "los", "las", "que", "por", "con", "para", "una", "es", "se", "del", "como",
+            "pero", "son", "está", "este", "esta", "todo", "más", "muy", "hay", "sus",
+            "la", "un", "y", "al", "lo", "le", "les", "su", "mi", "tu", "nos",
+            "ni", "dos", "tres", "fue", "fueron", "ser", "tiene", "tienen", "tengo", "puede",
+            "pueden", "quiero", "necesito", "hemos", "han", "sobre", "entre", "cuando", "donde",
+            "porque", "aunque", "también", "ya", "eso", "esto", "esa", "ese", "nada", "algo",
+            "aquí", "hoy", "gracias")),
+        // `no` is Portuguese too, and one of the most frequent English words, so it stays out.
+        ("pt", Set("os", "as", "que", "em", "um", "uma", "para", "com", "não", "é", "se", "do", "da",
+            "dos", "das", "mas", "são", "está", "este", "esta", "muito", "pelo", "pela",
+            "o", "e", "na", "nas", "nos", "ao", "aos", "por", "foi", "era", "ser", "sou",
+            "tem", "tenho", "pode", "podem", "quero", "preciso", "eu", "meu", "minha", "seu",
+            "sua", "isso", "isto", "aqui", "ali", "como", "quando", "onde", "porque", "mais",
+            "já", "ainda", "agora", "hoje", "ontem", "dois", "três", "tudo", "nada", "obrigado",
+            "olá")),
+        // The articulated prepositions are Italian-only, which lets a state of shared articles still name it.
+        ("it", Set("il", "lo", "gli", "che", "di", "per", "con", "non", "è", "si", "del", "della", "sono",
+            "questo", "questa", "anche", "come", "più", "nella", "alla",
+            "la", "le", "un", "uno", "una", "e", "ed", "o", "da", "su", "tra", "fra", "mi",
+            "ci", "ne", "ho", "hai", "ha", "abbiamo", "avete", "hanno", "era", "stato", "stata",
+            "devo", "deve", "devono", "voglio", "vorrei", "mio", "mia", "tuo", "sua", "quando",
+            "dove", "perche", "molto", "poco", "sempre", "mai", "già", "ancora", "adesso", "oggi",
+            "ieri", "grazie", "ciao", "scusa",
+            "nel", "nell", "negli", "sul", "sulla", "sulle", "dal", "dalla", "dallo", "dagli", "dei",
+            "delle", "dello", "degli", "agli", "alle", "col")),
+        ("nl", Set("het", "een", "van", "is", "op", "te", "dat", "niet", "met", "voor", "zijn", "aan",
+            "door", "maar", "ook", "worden", "deze", "naar", "wordt")),
+        // Romanian words its Romance neighbours do not share (`la`, `o`, `un`, `de`, `pe`, `ca` left out),
+        // so adding it cannot steal a French/Spanish/Italian/Portuguese state.
+        ("ro", Set("și", "să", "este", "sunt", "care", "pentru", "din", "dar", "după", "până", "fără",
+            "ale", "lui", "în", "fost", "acum", "vreau", "trebuie", "foarte", "acest", "această",
+            "acesta", "aceasta", "mi", "ți", "vă", "nu")),
+    ];
 
+    // Letters ordinary English does not use: the signal that catches a Latin-script language with no
+    // stopword list (Polish, Czech, Turkish, Baltic, ...) before it is handed to the English checkpoint.
     private static readonly HashSet<char> NonEnglishDiacritics =
-        [.. "àâäãáåçéèêëíìîïñóòôöõøúùûüýÿßæœđłşţğıåäö"];
+    [
+        .. "àâäãáåçéèêëíìîïñóòôöõøúùûüýÿßæœ",     // Western European
+        .. "ăâîșțşţ",                              // Romanian
+        .. "ąćęłńśźż",                             // Polish
+        .. "čďěňřšťůž",                            // Czech / Slovak
+        .. "őű",                                   // Hungarian
+        .. "ğı",                                   // Turkish (text is lowercased before matching)
+        .. "āēģīķļņūž",                            // Baltic
+        .. "đ",                                    // Serbo-Croatian / Vietnamese
+    ];
+
+    // Words more than one list claims: matching one says "not English" without saying which language.
+    private static readonly HashSet<string> SharedWords = BuildSharedWords();
+
+    /// <summary>A diacritic rate at or above this is evidence the text is not English.</summary>
+    public const double NonEnglishDiacriticRate = 0.02;
+
+    private static HashSet<string> BuildSharedWords()
+    {
+        var counts = new Dictionary<string, int>(StringComparer.Ordinal);
+        foreach (var (_, words) in StopWords)
+        {
+            foreach (string word in words) counts[word] = counts.GetValueOrDefault(word) + 1;
+        }
+        return [.. counts.Where(c => c.Value > 1).Select(c => c.Key)];
+    }
 
     private static HashSet<string> Set(params string[] words) => [.. words];
 
@@ -222,26 +304,15 @@ public static partial class LanguageDetector
     }
 
     /// <summary>
-    /// Best-effort language code for Latin-script text, or null when undecided. A non-English
-    /// language has to beat English by a margin, so ordinary English is never misrouted; short
-    /// inputs return null on purpose.
+    /// The evidence behind the Latin-script language guess. <see cref="Analyse(object?)"/> needs it rather
+    /// than just the verdict, because "undecided" and "English" are different answers and only one of
+    /// them is safe to send to the English checkpoint. A non-English language is only named when it
+    /// matched at least one word no other list claims.
     /// </summary>
-    public static string? GuessLatinLanguage(string text)
+    public static LatinProfile LatinProfile(string text)
     {
         var words = new List<string>();
         foreach (Match match in WordPattern().Matches(text)) words.Add(match.Value.ToLowerInvariant());
-        if (words.Count < 4) return null;
-
-        var scores = new Dictionary<string, int>(StringComparer.Ordinal);
-        foreach (var (language, stopWords) in StopWords)
-        {
-            int hits = 0;
-            foreach (string word in words)
-            {
-                if (stopWords.Contains(word)) hits++;
-            }
-            scores[language] = hits;
-        }
 
         string lowered = text.ToLowerInvariant();
         int diacritics = 0;
@@ -250,28 +321,80 @@ public static partial class LanguageDetector
             if (NonEnglishDiacritics.Contains(c)) diacritics++;
         }
         double diacriticRate = (double)diacritics / Math.Max(1, lowered.Length);
+        bool nonEnglish = diacriticRate >= NonEnglishDiacriticRate;
+        if (words.Count < 4) return new LatinProfile(null, 0, diacriticRate, nonEnglish);
 
-        int english = scores.GetValueOrDefault("en");
+        var distinct = new HashSet<string>(words, StringComparer.Ordinal);
+        int english = 0;
         string? bestLanguage = null;
         int best = 0;
-        foreach (var (language, score) in scores)
+        foreach (var (language, stopWords) in StopWords)
         {
-            if (language == "en") continue;
-            if (bestLanguage is null || score > best)
+            int hits = 0;
+            foreach (string word in words)
+            {
+                if (stopWords.Contains(word)) hits++;
+            }
+            if (language == "en")
+            {
+                english = hits;
+                continue;
+            }
+
+            // Only a language that matched a word of its own may be named: the top score can otherwise
+            // be pure overlap (`la` and `e` in Romanian text made Italian the winner). Such a language
+            // drops out of the running rather than losing the tie, so a lesser score with real evidence
+            // is still named.
+            bool evidenced = false;
+            foreach (string word in distinct)
+            {
+                if (stopWords.Contains(word) && !SharedWords.Contains(word))
+                {
+                    evidenced = true;
+                    break;
+                }
+            }
+            if (!evidenced) continue;
+            if (bestLanguage is null || hits > best)
             {
                 bestLanguage = language;
-                best = score;
+                best = hits;
             }
         }
 
-        if (best == 0 && diacriticRate < 0.02) return english > 0 ? "en" : null;
-        if (bestLanguage is not null && best >= Math.Max(2, english + 2)) return bestLanguage;
-        if (diacriticRate >= 0.04 && bestLanguage is not null && best >= english) return bestLanguage;
-        return english > 0 ? "en" : null;
+        string? guess = null;
+        if (bestLanguage is not null && best >= Math.Max(2, english + 2))
+        {
+            guess = bestLanguage;                   // a clear margin over English function words
+        }
+        else if (bestLanguage is not null && nonEnglish && best >= Math.Max(2, english))
+        {
+            guess = bestLanguage;                   // two hits here too: one shared word is a guess
+        }
+        else if (english > 0 && !nonEnglish)
+        {
+            guess = "en";
+        }
+        return new LatinProfile(guess, english, diacriticRate, nonEnglish);
     }
 
+    private static int CountWords(string text) => WordPattern().Count(text);
+
+    /// <summary>
+    /// Best-effort language code for Latin-script text, or null when undecided. A non-English
+    /// language has to beat English by a margin and match a word of its own, so ordinary English is
+    /// never misrouted; short inputs return null on purpose.
+    /// </summary>
+    public static string? GuessLatinLanguage(string text) => LatinProfile(text).Language;
+
     /// <summary>Full detection result for a state.</summary>
-    public static LanguageAnalysis Analyse(object? state)
+    public static LanguageAnalysis Analyse(object? state) => Analyse(state, classifier: null);
+
+    /// <summary>
+    /// Full detection result for a state, consulting <paramref name="classifier"/> when the heuristic
+    /// cannot identify a Latin-script language.
+    /// </summary>
+    public static LanguageAnalysis Analyse(object? state, ILanguageClassifier? classifier)
     {
         string text = StateText(state);
         var profile = ScriptProfile(text);
@@ -280,17 +403,44 @@ public static partial class LanguageDetector
 
         if (script == "unknown")
         {
-            return new LanguageAnalysis("unknown", profile, null, true, 0d);
+            return new LanguageAnalysis("unknown", profile, null, true, true, 0d, 0d);
         }
         if (script != "latin")
         {
-            return new LanguageAnalysis(script, profile, null, false, nonLatin);
+            return new LanguageAnalysis(script, profile, null, false, true, 0d, nonLatin);
         }
 
-        string? language = GuessLatinLanguage(text);
-        return new LanguageAnalysis("latin", profile, language, language is null or "en", nonLatin);
+        var latin = LatinProfile(text);
+        // Undecided is not English: non-English letters are enough to prefer the multilingual
+        // checkpoint, while text without them (including short English) still goes to the English one.
+        bool undecided = latin.Language is null;
+        bool english = latin.Language == "en" || (undecided && !latin.LooksNonEnglish);
+        var analysis = new LanguageAnalysis("latin", profile, latin.Language, english, undecided,
+            Math.Round(latin.DiacriticRate, 4), nonLatin);
+
+        // The heuristic admits what it cannot see: a plain-ASCII language it holds no stopwords for
+        // (Indonesian, Swahili, Turkish without its letters) reads as undecided-therefore-English.
+        // That is exactly the case a real classifier is for, and the only one it is asked about.
+        if (undecided && english && classifier is not null && CountWords(text) >= classifier.MinimumWords)
+        {
+            var guess = classifier.Classify(text);
+            if (guess is not null)
+            {
+                double nonEnglish = 1d - guess.Value.EnglishProbability;
+                analysis = analysis with
+                {
+                    ClassifierLanguage = guess.Value.Language,
+                    ClassifierProbability = Math.Round(guess.Value.Probability, 4),
+                    IsEnglish = guess.Value.Language == "en" || nonEnglish < classifier.MinimumProbability,
+                };
+            }
+        }
+        return analysis;
     }
 
     /// <summary>True when the English checkpoint can be expected to read this state.</summary>
     public static bool IsEnglish(object? state) => Analyse(state).IsEnglish;
+
+    /// <inheritdoc cref="IsEnglish(object?)"/>
+    public static bool IsEnglish(object? state, ILanguageClassifier? classifier) => Analyse(state, classifier).IsEnglish;
 }

@@ -251,7 +251,42 @@ using var router = new Router().Preload(["english", "multilingual"]);
 ```
 
 `LanguageDetector.Analyse(state)` exposes the same detection on its own — script profile, guessed
-Latin language, and whether the text is English — with no model loaded at all.
+Latin language, whether the text is English, and whether the language was identified at all — with
+no model loaded.
+
+The Latin-script guess is a stopword and diacritic heuristic, and it is honest about what it cannot
+see: a language is named only on a word no other list claims, and text it cannot identify that
+carries non-English letters (Romanian, Polish, Czech, Turkish, Vietnamese, …) goes to the
+multilingual checkpoint rather than being assumed English. What it still cannot see is a plain-ASCII
+language it holds no list for — Indonesian, Swahili, Tagalog, Turkish with its letters stripped. For
+those, plug in a statistical language identifier; `Laya.Catalyst` wraps
+[Catalyst](https://github.com/curiosity-ai/catalyst)'s (53 languages, model embedded, no download):
+
+```csharp
+// dotnet add package Laya.Catalyst
+var router = new Router { LanguageClassifier = await CatalystLanguageClassifier.CreateAsync() };
+router.Route("Saya ditagih dua kali untuk langganan saya bulan ini").Model;   // multilingual
+```
+
+The classifier is consulted only for text the heuristic left undecided and would have sent to the
+English checkpoint, so it can move a state to the multilingual checkpoint but never an identified
+one away from it.
+
+---
+
+## Many labels: shortlist first
+
+Every option of a `choice` shares one `head_max_len` budget, so a 70-way intent leaves each label a
+handful of tokens. `Shortlist.PredictShortlist` embeds the state and the labels, keeps the top `k` by
+cosine similarity and runs one decision pass over those:
+
+```csharp
+EmbedFunction embed = Shortlist.EmbedFunctionFromAgent(agent);   // or any bi-encoder of your own
+var result = Shortlist.PredictShortlist(agent, state, questions, embed, k: 20);
+result.Shortlist;   // per question: the kept labels, their similarities, k and n
+```
+
+Probabilities on a shortlisted question are over the kept labels only.
 
 ---
 
@@ -268,6 +303,10 @@ laya tokenize      Tokenize text with a checkpoint's tokenizer
 laya dump-states   Write per-layer activations for parity checking
 laya bench         Time the forward pass
 laya profile       Stage timings, allocations and a sampling profile
+laya dataset       Download a typed-decisions split to JSON lines
+laya train         Fine-tune a checkpoint (see Fine-tuning)
+laya calibrate     Refit a checkpoint's temperatures on labelled cases, weights untouched
+laya evaluate      Accuracy, soft accuracy, Brier, ECE, KL, score MAE on typed-decisions cases
 ```
 
 ```bash
@@ -282,6 +321,47 @@ dotnet run --project src/Laya.Cli -c Release -- \
             --question 'team=choice:Who handles this?|billing,support,security' \
             --state-file ticket.json
 ```
+
+---
+
+## Fine-tuning
+
+`Laya.Training` fine-tunes a checkpoint on your own typed decisions, on the CPU. It is the C# port
+of the reference [Kaggle notebook](.reference/notebooks/laya_finetune_typed_decisions_2xT4_kaggle.ipynb):
+the same RLCD objective (a group-relative policy gradient over noisy logits, scored by a strictly
+proper reward, plus soft cross-entropy), AdamW with cosine annealing, gradient clipping, and
+post-training temperature calibration. The result is an ordinary checkpoint directory that
+`Agent.FromDirectory` loads.
+
+```bash
+laya dataset --split train                                   # LocalLLaMA/typed-decisions -> JSON lines
+laya train --model english --data artifacts/data/LocalLLaMA_typed-decisions.all.train.jsonl \
+           --out artifacts/models/my-decisions --train-layers 4
+laya evaluate --model-dir artifacts/models/my-decisions --split test
+```
+
+```csharp
+using Laya.Training;
+
+var cases = DecisionDataset.ReadJsonLines("train.jsonl");       // {state, questions, gold} per line
+var items = DecisionDataset.BuildItems(tokenizer, cases, maxLength: 512, headMaxLength: 192);
+var report = new Trainer(new TrainerOptions { TrainableEncoderLayers = 4 })
+    .Train(sourceDirectory, [.. items.Select(i => i.Item)], "my-decisions");
+```
+
+Training the whole 421M-parameter encoder needs about 10 GB of RAM and, on four cores, 15–25 s per
+micro-batch of four sequences; `--train-layers n` trains only the top `n` encoder layers (0 = the
+head only) and costs proportionally less. Every layer is checkpointed, so activation memory stays
+at one layer's worth whatever the batch. The defaults are the notebook's; the notebook ran two GPUs,
+so its effective batch was twice one process's.
+
+Three things differ from the notebook on purpose. Its calibration set, `all_items[::15]`, strides
+over items grouped five questions to a case, so every sample is the same question — a `choice` —
+and `score` and `noul` are never fitted; the same number of items is drawn at random instead.
+Calibration also fits the `type:option-count`
+buckets that inference reads first, and replaces the base checkpoint's buckets — the notebook left
+them in place, where they shadowed its new per-type fit. And fitted temperatures are clamped to the
+range inference applies, so what is saved is what is used.
 
 ---
 
@@ -386,6 +466,12 @@ one tensor by tensor: every encoder layer, head layer, logit, action logit and f
 all three checkpoints. On the English checkpoint the worst per-layer deviation is ~3e-5 absolute
 against activations in the tens of thousands, and the answers agree to every reported digit. The
 tokenizers (byte-level BPE and SentencePiece-style BPE) match `transformers` exactly.
+
+Training is held to the same standard: every parameter gradient of a small random
+`DecisionModel` matches PyTorch autograd to ~1e-6 relative, a subset of the real English
+checkpoint's gradients to ~1e-5, the RLCD loss and its logit gradient match the notebook's code on
+the same random draws, AdamW and the cosine schedule match `torch.optim`, and training sequences
+match the notebook's `build_training_item` token for token.
 
 Golden dumps live in [`tests/Laya.Tests/Fixtures/`](tests/Laya.Tests/Fixtures), so the parity
 suite runs without Python:

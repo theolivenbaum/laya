@@ -1,5 +1,7 @@
 variables:
   projectLaya:        './src/Laya/Laya.csproj'
+  projectCatalyst:    './src/Laya.Catalyst/Laya.Catalyst.csproj'
+  projectTraining:    './src/Laya.Training/Laya.Training.csproj'
   solution:           './Laya.slnx'
   buildConfiguration: 'Release'
   targetVersion: yy.M.$(build.buildId)
@@ -48,6 +50,20 @@ steps:
   inputs:
     command: 'build'
     projects: '$(projectLaya)'
+    arguments: '-c $(buildConfiguration) /p:Version=$(targetVersion) /p:LayaEnableNet11=false /p:GeneratePackageOnBuild=true'
+
+- task: DotNetCoreCLI@2
+  displayName: 'build Laya.Catalyst project'
+  inputs:
+    command: 'build'
+    projects: '$(projectCatalyst)'
+    arguments: '-c $(buildConfiguration) /p:Version=$(targetVersion) /p:LayaEnableNet11=false /p:GeneratePackageOnBuild=true'
+
+- task: DotNetCoreCLI@2
+  displayName: 'build Laya.Training project'
+  inputs:
+    command: 'build'
+    projects: '$(projectTraining)'
     arguments: '-c $(buildConfiguration) /p:Version=$(targetVersion) /p:LayaEnableNet11=false /p:GeneratePackageOnBuild=true'
 
 - task: NuGetCommand@2

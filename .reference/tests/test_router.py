@@ -1,9 +1,12 @@
 """Routing and language-detection tests. No model weights are loaded: `Router.route` is pure."""
 import sys
 import os
+import threading
+import time as _time
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+from laya.common import QTYPES, TEMP_MAX, TEMP_MIN, clamp_temperature, temp_bucket  # noqa: E402
 from laya.lang import analyse, detect_script, guess_latin_language, is_english, state_text  # noqa: E402
 from laya.router import (  # noqa: E402
     BUNDLE_REPO,
@@ -28,6 +31,9 @@ def check(name, got, want):
 # --------------------------------------------------------------------- script detection
 SCRIPTS = [
     ("english", "The customer was charged twice and wants a refund.", "latin"),
+    ("armenian", "Հայերեն", "armenian"),
+    ("armenian uppercase", "ՀԱՅԵՐԵՆ", "armenian"),
+    ("armenian punctuation only", "։֊", "unknown"),
     ("french", "Le client a été facturé deux fois et demande un remboursement.", "latin"),
     ("hindi", "ग्राहक से दो बार शुल्क लिया गया और वह धनवापसी चाहता है।", "devanagari"),
     ("japanese", "お客様は二重に請求されたため返金を希望しています。", "kana"),
@@ -49,6 +55,7 @@ for label, text, want in SCRIPTS:
 # --------------------------------------------------------------------- english vs not
 for label, text, want in [
     ("plain english", "Please refund the duplicate charge on invoice 4411 today.", True),
+    ("armenian", "Հայերեն", False),
     ("english short", "refund me", True),
     ("hindi", "ग्राहक से दो बार शुल्क लिया गया", False),
     ("japanese", "お客様は二重に請求されました", False),
@@ -57,8 +64,41 @@ for label, text, want in [
                     "facture qui a été payée le mois dernier avec la carte de crédit", False),
     ("german long", "Der Kunde wurde zweimal belastet und möchte eine Rückerstattung für die "
                     "Rechnung die nicht korrekt ist und auch nicht bezahlt wurde", False),
+    # Latin-script languages with no stopword list of their own: reported in #35, where Romanian
+    # states were handed to the English checkpoint (0.330 accuracy, 0.658 ECE on `ro`) instead of
+    # the multilingual one. An unidentified language must never be assumed English.
+    ("romanian", "Gătește-mi o rețetă de sarmale de post pentru mâine.", False),
+    ("romanian invoice", "Am fost taxat de două ori pentru factura din luna martie și vreau banii", False),
+    ("polish", "Klient został obciążony dwukrotnie i chce zwrot pieniędzy za fakturę", False),
+    ("czech", "Zákazníkovi byla částka účtována dvakrát a žádá o vrácení peněz", False),
+    ("turkish", "Müşteriden iki kez ücret alındı ve para iadesi istiyor lütfen yardım", False),
+    ("vietnamese", "Khách hàng đã bị thu phí hai lần và muốn được hoàn tiền ngay", False),
+    # English with the odd loanword must not tip over into the multilingual checkpoint
+    ("english with loanwords", "We visited a cafe in Zurich and the naive assumption about the "
+                               "invoice was wrong, so please refund the duplicate charge", True),
 ]:
     check("is_english/" + label, is_english(text), want)
+
+# Undecided is reported as undecided rather than dressed up as a detection: a single shared
+# function word used to name a language ("para" in Turkish text was called Spanish).
+check("latin/undecided is flagged", analyse("Müşteriden iki kez ücret alındı ve para iadesi istiyor")["language_undecided"], True)
+check("latin/undecided names no language", analyse("Müşteriden iki kez ücret alındı ve para iadesi istiyor")["language"], None)
+check("latin/english is not undecided", analyse("Please refund the duplicate charge on the invoice")["language_undecided"], False)
+check("latin/diacritic rate reported", analyse("Gătește-mi o rețetă de sarmale")["diacritic_rate"] > 0.02, True)
+check("latin/english has no diacritics", analyse("Please refund the duplicate charge today")["diacritic_rate"], 0.0)
+# every branch of analyse() reports the same keys, so a caller can read one without guarding
+_KEYS = {"script", "script_profile", "language", "is_english", "language_undecided",
+         "diacritic_rate", "non_latin_fraction"}
+for label, text in [("english", "Please refund the duplicate charge"), ("hindi", "ग्राहक से दो बार"),
+                    ("romanian", "Gătește-mi o rețetă de sarmale"), ("no letters", "12345 ???")]:
+    check("analyse/keys " + label, set(analyse(text)), _KEYS)
+# A 0-0 tie between non-English stopword lists is no evidence for any of them
+check("latin_lang/zero tie invents nothing", guess_latin_language("Cât e ora acum la Tokyo"), None)
+
+# Known limitation, kept visible on purpose: Romanian short enough to carry no diacritics and an
+# English function word ("in") still reads as English. A real LID model is the fix, not more
+# stopwords -- see the discussion in #35.
+check("latin/KNOWN GAP romanian without diacritics", is_english("Care este ora in Tokyo?"), True)
 
 
 # --------------------------------------------------------------------- Latin language guess
@@ -87,6 +127,9 @@ check("state_text/keys ignored",
 
 
 # --------------------------------------------------------------------- workflow signatures
+check("profile/armenian", analyse("Հայերեն")["script_profile"], {"armenian": 1.0})
+check("profile/armenian mixed with Latin", analyse("Հայերեն abc")["non_latin_fraction"], 0.7)
+
 TD = {
     "agent_trace_observability": ["action", "needs_review", "outcome", "risk", "urgency"],
     "customer_service": ["action", "category", "churn_risk", "needs_human", "urgency"],
@@ -121,6 +164,8 @@ Q_TD = {i: {"type": "noul", "instructions": "x"} for i in TD["customer_service"]
 
 cases = [
     ("english text", {"body": "I was charged twice, please refund."}, Q_GENERIC, {}, "english"),
+    ("armenian text", {"body": "Հայերեն"}, Q_GENERIC, {}, "multilingual"),
+    ("armenian explicit override", {"body": "Հայերեն"}, Q_GENERIC, {"model": "english"}, "english"),
     ("hindi text", {"body": "मुझसे दो बार शुल्क लिया गया"}, Q_GENERIC, {}, "multilingual"),
     ("japanese text", {"body": "二重に請求されました"}, Q_GENERIC, {}, "multilingual"),
     ("korean text", {"body": "두 번 청구되었습니다"}, Q_GENERIC, {}, "multilingual"),
@@ -161,6 +206,103 @@ check("decision/is dict", isinstance(d, dict), True)
 # default override
 check("route/custom default", Router(default="multilingual").route("12345", Q_GENERIC)["model"],
       "multilingual")
+
+
+# --------------------------------------------------------------------- unknown-Latin routing (#35)
+_r_lat = Router()
+for label, text in [
+    ("romanian", "Gătește-mi o rețetă de sarmale de post pentru mâine."),
+    ("romanian agent request", "Exportă APK-ul pentru Android și pune-l pe Drive ca să-l instalez."),
+    ("polish", "Klient został obciążony dwukrotnie i chce zwrot pieniędzy za fakturę"),
+    ("turkish", "Müşteriden iki kez ücret alındı ve para iadesi istiyor lütfen yardım"),
+]:
+    check("route/unknown latin " + label, _r_lat.route(text).model, "multilingual")
+# and the reason must say what it actually routed on, not report a language it did not identify
+check("route/undecided reason mentions letters",
+      "not identified" in _r_lat.route("Müşteriden iki kez ücret alındı ve para iadesi istiyor").reason, True)
+check("route/english still english",
+      _r_lat.route("Please refund the duplicate charge on invoice 4411 today.").model, "english")
+check("route/short english still english", _r_lat.route("refund me").model, "english")
+
+
+# --------------------------------------------------------------------- plain-ASCII Romance (#172)
+# A state that lost its accents carries no diacritic rate for the non-English signal to read, and
+# mail clients and ticket systems strip them routinely, so the function-word lists are the only
+# evidence left. Spanish and Italian complaints were reported `is_english=True` and handed to the
+# English checkpoint -- the one that collapses off English -- while the accented spelling of the
+# same text reached multilingual. The lists for fr/es/pt/it held mostly accented words (`está`,
+# `más`, `è`, `être`, `não`) plus a handful of unaccented ones, so a stripped state matched one
+# word or none and fell under the two-hit margin below.
+for lang, text in [
+    ("es", "El pedido llego roto y nadie responde cuando escribo al soporte"),
+    ("es", "Quiero cancelar mi plan y pedir un reembolso"),
+    ("es", "La factura tiene un error en el importe total"),
+    ("es", "Necesito que me devuelvan el dinero de la compra duplicada"),
+    ("it", "Il cliente e stato addebitato due volte e vuole un rimborso"),
+    ("it", "Voglio cancellare il mio abbonamento e chiedere un rimborso"),
+    ("it", "La fattura contiene un errore nell importo totale"),
+    ("pt", "O cliente foi cobrado duas vezes e quer o dinheiro de volta"),
+    ("fr", "Le client a ete facture deux fois et demande un remboursement"),
+    ("fr", "Je ne peux pas acceder a mon compte et j ai besoin d aide"),
+]:
+    check("latin_lang/plain ascii " + lang + " " + text[:32], guess_latin_language(text), lang)
+    check("is_english/plain ascii " + lang + " " + text[:32], is_english(text), False)
+    check("route/plain ascii " + lang + " " + text[:32], _r_lat.route(text).model, "multilingual")
+# the accented spellings must keep working: those route on the diacritic rate
+for lang, text in [
+    ("es", "La facturación tiene un error y necesito una corrección urgente"),
+    ("it", "La fattura è sbagliata, devo avere un rimborso per il pagamento"),
+    ("fr", "La commande est arrivée cassée et personne ne répond au support"),
+]:
+    check("route/accented " + lang, _r_lat.route(text).model, "multilingual")
+
+# English must not move for this. The added words are ordinary English tokens as well -- `de facto`,
+# `et al.`, `e.g.`, `la carte`, `UN`, `MI5`, `DOS` -- and a state carrying none of them is the case
+# that has to keep routing to English.
+for text in [
+    "The customer was charged twice and wants a refund for this invoice",
+    "Please cancel my subscription and refund the duplicate charge today",
+    "The report by Smith et al. shows the de facto standard, e.g. the LA office and Rio",
+    "Our MI5 and UN contacts discussed the DOS attack in LA last month",
+    "No refund was issued, so I am writing to you again about invoice 4411",
+    "no refund no reply",
+    "The son of the director filed a complaint about the duplicate invoice",
+]:
+    check("is_english/romance control " + text[:32], is_english(text), True)
+    check("route/romance control " + text[:32], _r_lat.route(text).model, "english")
+
+# A word several lists claim (`la`, `e`, `o`) says "not English" without saying *which* language, so
+# it may not name one on its own -- the same rule as the 0-0 tie above, which is why the sample
+# below still names nothing even though `la` and `e` now count for Italian: it routes to multilingual
+# on the Romanian diacritic, not on a guessed language.
+check("latin_lang/shared words alone name nothing",
+      analyse("Cât e ora acum la Tokyo")["language"], None)
+check("route/shared words still multilingual",
+      _r_lat.route("Cât e ora acum la Tokyo").model, "multilingual")
+# ...but a distinctive word in the same state is enough to name the language it belongs to.
+check("latin_lang/distinctive word names the language",
+      guess_latin_language("La fattura contiene un errore nell importo totale"), "it")
+check("latin_lang/shared hits still count toward a named language",
+      guess_latin_language("La factura tiene un error en el importe total"), "es")
+
+
+# --------------------------------------------------------------------- temperature clamp (#35)
+# A fitted temperature below 1 sharpens logits. The shipped `choice:11+` bucket is 0.1006, which
+# turned a 0.24 top probability into 0.99 confidence on 13-option skill routing.
+check("clamp/pathological sharpening", clamp_temperature(0.1006), 0.5)
+check("clamp/shipped choice:11+ is rejected", clamp_temperature(0.10058280825614929), TEMP_MIN)
+check("clamp/legitimate value untouched", clamp_temperature(1.7601518630981445), 1.7601518630981445)
+check("clamp/neutral untouched", clamp_temperature(1.0), 1.0)
+check("clamp/upper bound", clamp_temperature(9.0), TEMP_MAX)
+check("clamp/zero", clamp_temperature(0.0), TEMP_MIN)
+check("clamp/negative", clamp_temperature(-3.0), TEMP_MIN)
+check("clamp/none falls back to neutral", clamp_temperature(None), 1.0)
+check("clamp/garbage falls back to neutral", clamp_temperature("x"), 1.0)
+check("clamp/nan falls back to neutral", clamp_temperature(float("nan")), 1.0)
+check("clamp/inf falls back to neutral", clamp_temperature(float("inf")), 1.0)
+check("clamp/bounds are sane", TEMP_MIN <= 1.0 <= TEMP_MAX, True)
+# 13 options is the bucket the reported skill-router landed in
+check("clamp/13 options is the 11+ bucket", temp_bucket(QTYPES["choice"], 13), "choice:11+")
 
 
 # --------------------------------------------------------------------- LRU bookkeeping
@@ -269,6 +411,81 @@ check("attach/survives a later load", sorted(ra.loaded), ["english", "multilingu
 check("attach/still the same object", ra._agents["english"] is sentinel, True)
 check("attach/accepts aliases", stubbed_router(1).attach("en", _Stub("x")) is not None, True)
 
+
+# --------------------------------------------------------------------- thread safety (issue #95)
+
+def _concurrent_load_dedup():
+    """Concurrent load() of the same checkpoint must build one Agent, shared by all callers."""
+    import laya.agent as _agent_mod
+    constructions = []
+    cl = threading.Lock()
+
+    class _SlowAgent:
+        def __init__(self, *args, **kwargs):
+            _time.sleep(0.05)  # widen the check-then-build window
+            with cl:
+                constructions.append(1)
+
+        def system_one(self, state, questions):
+            return {"model": "fake", "answers": {}, "usage": {}}
+
+    old = _agent_mod.Agent
+    _agent_mod.Agent = _SlowAgent
+    try:
+        r = Router()
+        got = []
+
+        def _worker():
+            got.append(r.load("english"))
+
+        threads = [threading.Thread(target=_worker) for _ in range(8)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+        return len({id(x) for x in got}), len(constructions), len(r._order), sorted(r._agents)
+    finally:
+        _agent_mod.Agent = old
+
+unique, built, order_len, agents = _concurrent_load_dedup()
+check("threads/8 concurrent loads share one Agent", unique, 1)
+check("threads/Agent constructed exactly once", built, 1)
+check("threads/LRU views stay consistent", (order_len == 1 and agents == ["english"]), True)
+
+
+def _concurrent_hotpath():
+    """Concurrent hot-path loads of an already-cached model must keep _order/_agents consistent."""
+    import laya.agent as _agent_mod
+
+    class _Agent:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def system_one(self, state, questions):
+            return {"model": "fake", "answers": {}, "usage": {}}
+
+    old = _agent_mod.Agent
+    _agent_mod.Agent = _Agent
+    try:
+        r = Router(max_loaded=3)
+        r.load("english")  # warm the cache
+
+        def _worker():
+            r.load("english")
+
+        threads = [threading.Thread(target=_worker) for _ in range(20)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+        return len(r._order), len(r._agents), r._order
+    finally:
+        _agent_mod.Agent = old
+
+order_len, agents_len, order = _concurrent_hotpath()
+check("threads/hot-path loads keep one entry", order_len, 1)
+check("threads/hot-path loads keep agents consistent", agents_len, 1)
+check("threads/hot-path order intact", order, ["english"])
 
 # --------------------------------------------------------------------- report
 print("\n%d passed, %d failed" % (len(PASS), len(FAIL)))

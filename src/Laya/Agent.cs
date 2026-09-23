@@ -33,7 +33,37 @@ public sealed class Agent : IDecisionEngine
         EncoderConfig = encoderConfig;
         Tokenizer = tokenizer;
         Model = new DecisionModel(encoderConfig, config, weights);
+
+        var rejected = new List<string>();
+        for (int i = 0; i < config.Temperature.Count; ++i)
+        {
+            if (Calibration.ClampTemperature(config.Temperature[i]) != config.Temperature[i])
+            {
+                rejected.Add(string.Create(System.Globalization.CultureInfo.InvariantCulture, $"temperature[{i}]={config.Temperature[i]:G4}"));
+            }
+        }
+        foreach (var (bucket, value) in config.TemperatureByOptions)
+        {
+            if (Calibration.ClampTemperature(value) != value)
+            {
+                rejected.Add(string.Create(System.Globalization.CultureInfo.InvariantCulture, $"{bucket}={value:G4}"));
+            }
+        }
+        ClampedTemperatures = rejected;
+        if (rejected.Count > 0)
+        {
+            System.Diagnostics.Trace.TraceWarning(
+                $"laya: '{modelDirectory}' ships temperatures outside [{Calibration.TemperatureMin}, " +
+                $"{Calibration.TemperatureMax}] which would distort confidence; clamping {string.Join(", ", rejected)}. " +
+                "Treat confidence from the affected buckets as uncalibrated.");
+        }
     }
+
+    /// <summary>
+    /// The checkpoint temperatures that were outside the usable range and are clamped when applied,
+    /// as <c>name=value</c>. The raw values stay on <see cref="Config"/>. Empty for a healthy checkpoint.
+    /// </summary>
+    public IReadOnlyList<string> ClampedTemperatures { get; }
 
     /// <summary>
     /// Loads a checkpoint from a local directory, downloading it from the hub first when
@@ -58,7 +88,8 @@ public sealed class Agent : IDecisionEngine
         {
             throw new FileNotFoundException(
                 $"Incompatible model: '{directory}' does not contain 'rl_agent_config.json'. " +
-                "Make sure this is a laya decision checkpoint.", configPath);
+                "That file ships with the weights of a Laya checkpoint, so load one of those " +
+                "(e.g. 'convaiinnovations/laya') or a directory your own training run wrote.", configPath);
         }
 
         string weightsPath = Path.Combine(directory, "model.safetensors");
@@ -226,7 +257,7 @@ public sealed class Agent : IDecisionEngine
     {
         float temperature = TemperatureFor(question.Type, options);
         var probabilities = new float[options];
-        for (int i = 0; i < options; ++i) probabilities[i] = output.OptionLogits[i] / MathF.Max(1e-3f, temperature);
+        for (int i = 0; i < options; ++i) probabilities[i] = output.OptionLogits[i] / temperature;
         SimdOps.Softmax(probabilities);
 
         double confidence = Math.Round(Calibration.ConfidenceFromProbabilities(probabilities, options), 4);
@@ -279,9 +310,14 @@ public sealed class Agent : IDecisionEngine
 
     /// <summary>
     /// The calibration temperature for a question: the per-bucket value when one was fitted for
-    /// this <c>type:option-count</c> combination, otherwise the per-type fallback.
+    /// this <c>type:option-count</c> combination, otherwise the per-type fallback — clamped by
+    /// <see cref="Calibration.ClampTemperature"/>, since some shipped buckets sharpen rather than soften.
     /// </summary>
     public float TemperatureFor(QuestionType type, int options)
+        => Calibration.ClampTemperature(RawTemperatureFor(type, options));
+
+    /// <summary>The temperature exactly as the checkpoint ships it, before clamping.</summary>
+    public float RawTemperatureFor(QuestionType type, int options)
     {
         string bucket = QuestionTypes.TemperatureBucket(type, options);
         if (Config.TemperatureByOptions.TryGetValue(bucket, out float scoped)) return scoped;

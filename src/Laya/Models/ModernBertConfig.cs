@@ -138,6 +138,11 @@ public sealed class LayaConfig
     /// <summary>Number of action-head outputs: one per cost plus the implicit "do nothing".</summary>
     public int ActionCount => ActionCosts.Count + 1;
 
+    // A temperature that is not a number is kept as NaN, which Calibration.ClampTemperature turns
+    // into the neutral 1.0, as the Python's clamp_temperature does.
+    private static float NumberOrNaN(JsonElement value)
+        => value.ValueKind == JsonValueKind.Number ? (float)value.GetDouble() : float.NaN;
+
     public static LayaConfig Load(string path)
     {
         using var stream = File.OpenRead(path);
@@ -148,13 +153,13 @@ public sealed class LayaConfig
         if (root.TryGetProperty("temperature", out var temp) && temp.ValueKind == JsonValueKind.Array)
         {
             temperature.Clear();
-            foreach (var value in temp.EnumerateArray()) temperature.Add((float)value.GetDouble());
+            foreach (var value in temp.EnumerateArray()) temperature.Add(NumberOrNaN(value));
         }
 
         var byOptions = new Dictionary<string, float>(StringComparer.Ordinal);
         if (root.TryGetProperty("temperature_by_options", out var byOpt) && byOpt.ValueKind == JsonValueKind.Object)
         {
-            foreach (var entry in byOpt.EnumerateObject()) byOptions[entry.Name] = (float)entry.Value.GetDouble();
+            foreach (var entry in byOpt.EnumerateObject()) byOptions[entry.Name] = NumberOrNaN(entry.Value);
         }
 
         var costs = new Dictionary<string, float>(StringComparer.Ordinal);

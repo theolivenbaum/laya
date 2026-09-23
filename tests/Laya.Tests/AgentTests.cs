@@ -34,6 +34,43 @@ public class AgentTests(ITestOutputHelper output)
     }
 
     [ModelFact]
+    public void ASingleOptionChoiceIsFullyDecided()
+    {
+        // Upstream #103: topk(2) over one option raised. The answer is well defined — softmax over one
+        // logit is 1 — and the action head sees top1 − top2 = 1, as for any unambiguous gap.
+        using var agent = Agent.FromDirectory(TestModels.CheckpointDirectory("english"));
+        var result = agent.SystemOne("I was charged twice", new QuestionSet().Add("only", Question.Choice("Which team?", "billing")));
+        Assert.Equal("billing", result["only"].Choice);
+        Assert.Equal(1d, result["only"].ProbabilityOf("billing"));
+        Assert.InRange(result["only"].Action.ActProbability, 0d, 1d);
+    }
+
+    [ModelFact]
+    public void TheShippedElevenPlusBucketIsClamped()
+    {
+        using var agent = Agent.FromDirectory(TestModels.CheckpointDirectory("english"));
+        Assert.Contains(agent.ClampedTemperatures, t => t.StartsWith("choice:11+=", StringComparison.Ordinal));
+        Assert.True(agent.RawTemperatureFor(QuestionType.Choice, 13) < Calibration.TemperatureMin);
+        Assert.Equal(Calibration.TemperatureMin, agent.TemperatureFor(QuestionType.Choice, 13));
+    }
+
+    [ModelFact]
+    public void TheEncoderEmbedderShortlistsTheObviousLabel()
+    {
+        using var agent = Agent.FromDirectory(TestModels.CheckpointDirectory("english"));
+        var embed = Shortlist.EmbedFunctionFromAgent(agent);
+        var rows = embed(["refund my payment", "billing refund", ""]);
+        Assert.Equal(3, rows.Length);
+        Assert.All(rows, r => Assert.Equal(agent.EncoderConfig.HiddenSize, r.Length));
+
+        var question = Question.Choice("Which team?", "billing and refunds", "hardware repair",
+            "office catering", "legal contracts");
+        var kept = Shortlist.ShortlistChoice("I was charged twice and want a refund", question, embed, k: 2);
+        output.WriteLine(string.Join(", ", kept));
+        Assert.Equal(2, kept.Count);
+    }
+
+    [ModelFact]
     public void TriagePresetAnswersEveryQuestion()
     {
         using var agent = Agent.FromDirectory(TestModels.CheckpointDirectory("english"));

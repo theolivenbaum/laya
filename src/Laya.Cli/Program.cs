@@ -46,6 +46,10 @@ internal static class Program
                 "dump-states" => DumpStates(options),
                 "bench" => Bench(options),
                 "profile" => ProfileCommand.Run(options, OpenAgent, ReadState, ReadQuestions),
+                "dataset" => TrainCommands.Dataset(options),
+                "train" => TrainCommands.Train(options, ModelDirectory),
+                "evaluate" => TrainCommands.Evaluate(options, ModelDirectory),
+                "calibrate" => TrainCommands.Calibrate(options, ModelDirectory),
                 _ => Unknown(args[0]),
             };
         }
@@ -79,6 +83,10 @@ internal static class Program
           dump-states   Write per-layer activations for parity checking
           bench         Time the forward pass
           profile       Stage timings, allocations and a sampling profile of a forward pass
+          dataset       Download a typed-decisions split to JSON lines
+          train         Fine-tune a checkpoint (RLCD objective, AdamW, temperature calibration)
+          calibrate     Refit a checkpoint's temperatures on labelled cases (weights untouched)
+          evaluate      Score a checkpoint on typed-decisions cases (accuracy, Brier, ECE, ...)
 
         COMMON OPTIONS
           --model <name>        english | multilingual | typed-decisions   (default: english)
@@ -90,6 +98,23 @@ internal static class Program
           --cache <path>        Download cache root (default: ~/.cache/laya or $LAYA_HOME)
           --token <token>       Hugging Face token (default: $HF_TOKEN)
           --threads <n>         Kernel threads (default: $LAYA_THREADS, else every core)
+          --lid <name>          route: none | catalyst — a language classifier for text the
+                                built-in heuristic cannot identify (default: none)
+
+        TRAINING OPTIONS
+          --data <file.jsonl>   Training cases (default: download --dataset's train split)
+          --dataset <id>        Hugging Face dataset (default: LocalLLaMA/typed-decisions)
+          --config <name>       Dataset config (default: all)
+          --out <dir>           Where the fine-tuned checkpoint is written
+          --epochs <n>          (default 4)       --micro-batch <n>   (default 8)
+          --grad-accum <n>      (default 4)       --group-size <n>    (default 4)
+          --lr-encoder <x>      (default 2.5e-5)  --lr-head <x>       (default 1e-4)
+          --train-layers <n>    Train only the top n encoder layers (0 = head only; default all)
+          --max-steps <n>       Stop after n optimizer steps
+          --max-len <n>         Sequence budget for training and the saved config
+          --head-max-len <n>    Instructions + options budget
+          --limit <n>           Use only the first n cases
+          --eval-data <file>    Evaluate the result on these cases (or --eval for the test split)
 
         EXAMPLES
           laya download --model english --cache ./artifacts/models
@@ -98,8 +123,13 @@ internal static class Program
           laya predict --model-dir ./artifacts/models/english --preset triage \
                        --text "I was charged twice and nobody answers"
           laya route --text "Mein Konto wurde zweimal belastet"
+          laya route --lid catalyst --text "Saya ditagih dua kali untuk langganan saya"
           laya profile --model-dir ./artifacts/models/english --preset triage \
                        --text "…" --threads 1 --no-trace
+          laya dataset --split train
+          laya train --model english --data artifacts/data/LocalLLaMA_typed-decisions.all.train.jsonl \
+                     --out artifacts/models/my-typed-decisions --train-layers 4 --eval
+          laya evaluate --model-dir artifacts/models/my-typed-decisions --split test
           laya dump-states --model-dir ./artifacts/models/english \
                            --text "hello" --question noul:"Is this a greeting?" \
                            --out artifacts/dumps/dotnet.json
@@ -133,12 +163,23 @@ internal static class Program
         object? state = ReadState(options);
         var questions = options.Has("preset") || options.Has("question") ? ReadQuestions(options) : null;
         var router = new Router(autoTaskDetection: options.Has("auto-task"),
-            standaloneRepos: options.Has("standalone"));
+            standaloneRepos: options.Has("standalone"))
+        {
+            LanguageClassifier = LanguageClassifier(options),
+        };
         var decision = router.Route(state, questions, options.Value("force-model"), options.Value("task"),
             options.Value("lang"));
         Console.WriteLine(JsonSerializer.Serialize(decision, Json));
         return 0;
     }
+
+    /// <summary><c>--lid catalyst</c> adds a statistical language identifier to routing; the default is none.</summary>
+    private static ILanguageClassifier? LanguageClassifier(CommandLine options) => options.Value("lid") switch
+    {
+        null or "none" or "heuristic" => null,
+        "catalyst" => Laya.Catalyst.CatalystLanguageClassifier.CreateAsync().GetAwaiter().GetResult(),
+        string other => throw new ArgumentException($"unknown --lid '{other}'; expected none or catalyst."),
+    };
 
     private static int ListPresets()
     {

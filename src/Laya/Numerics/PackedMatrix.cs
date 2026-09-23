@@ -42,6 +42,22 @@ public sealed class PackedMatrix
 
     /// <summary>Repacks a PyTorch <c>[out, in]</c> weight.</summary>
     public PackedMatrix(ReadOnlySpan<float> rowMajor, int outFeatures, int inFeatures)
+        : this(rowMajor, outFeatures, inFeatures, inputMajor: false)
+    {
+    }
+
+    /// <summary>
+    /// Packs a matrix stored <c>[in, out]</c> — the transpose of the PyTorch layout — so that
+    /// <see cref="Multiply(ReadOnlySpan{float}, int, ReadOnlySpan{float}, Span{float}, ParallelOptions?)"/>
+    /// computes <c>input · data</c>. Backpropagation needs exactly this twice per projection:
+    /// <c>dX = dY · W</c> packs <c>W</c> itself as <c>[in = out_features, out = in_features]</c>, and
+    /// <c>dW = dYᵀ · X</c> packs the activations <c>X</c>. Both then run on the same tuned kernel as the
+    /// forward pass, rather than on a second, slower GEMM.
+    /// </summary>
+    public static PackedMatrix FromInputMajor(ReadOnlySpan<float> inputMajor, int outFeatures, int inFeatures)
+        => new(inputMajor, outFeatures, inFeatures, inputMajor: true);
+
+    private PackedMatrix(ReadOnlySpan<float> rowMajor, int outFeatures, int inFeatures, bool inputMajor)
     {
         if (rowMajor.Length < (long)outFeatures * inFeatures)
         {
@@ -63,6 +79,15 @@ public sealed class PackedMatrix
             int first = panel * _panelWidth;
             int columns = Math.Min(_panelWidth, outFeatures - first);
             long destination = (long)panel * _panelStride;
+            if (inputMajor)
+            {
+                for (int i = 0; i < inFeatures; ++i)
+                {
+                    rowMajor.Slice((int)((long)i * outFeatures + first), columns)
+                        .CopyTo(_data.AsSpan((int)(destination + (long)i * _panelWidth), columns));
+                }
+                continue;
+            }
             for (int i = 0; i < inFeatures; ++i)
             {
                 for (int j = 0; j < columns; ++j)

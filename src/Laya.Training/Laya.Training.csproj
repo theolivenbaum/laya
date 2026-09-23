@@ -1,0 +1,18 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework Condition="'$(LayaEnableNet11)' != 'true'">net10.0</TargetFramework>
+    <TargetFrameworks Condition="'$(LayaEnableNet11)' == 'true'">$(LayaTargetFrameworks)</TargetFrameworks>
+    <RootNamespace>Laya.Training</RootNamespace>
+    <AssemblyName>Laya.Training</AssemblyName>
+    <IsPackable>true</IsPackable>
+    <PackageId>Laya.Training</PackageId>
+    <Description>Fine-tuning for Laya decision checkpoints on the CPU: backpropagation through ModernBERT and the typed decision head, the RLCD objective, AdamW and temperature calibration.</Description>
+    <PackageTags>$(PackageTags);training;fine-tuning</PackageTags>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="../Laya/Laya.csproj" />
+  </ItemGroup>
+  <ItemGroup>
+    <InternalsVisibleTo Include="Laya.Tests" />
+  </ItemGroup>
+</Project>

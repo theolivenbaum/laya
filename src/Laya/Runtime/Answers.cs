@@ -77,6 +77,11 @@ public sealed record DecisionResult
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public RouteDecision? Routing { get; init; }
 
+    /// <summary>Present when the call went through <see cref="Shortlist.PredictShortlist(IDecisionEngine, object?, QuestionSet, EmbedFunction, int, ParallelOptions?)"/>.</summary>
+    [JsonPropertyName("shortlist")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public IReadOnlyList<KeyValuePair<string, ShortlistEntry>>? Shortlist { get; init; }
+
     public Answer this[string id]
     {
         get
