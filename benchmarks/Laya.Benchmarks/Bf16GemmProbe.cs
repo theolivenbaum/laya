@@ -33,7 +33,7 @@ internal static class Bf16GemmProbe
                 for (int i = 0; i < input.Length; ++i) input[i] = (float)(random.NextDouble() - 0.5);
                 var output = new float[t * outFeatures];
                 matrix.Multiply(input, t, output);
-                int repeats = Math.Max(2, (int)(4e9 / (2.0 * t * outFeatures * inFeatures)));
+                int repeats = Math.Max(3, (int)(2e10 / (2.0 * t * outFeatures * inFeatures)));
                 var stopwatch = Stopwatch.StartNew();
                 for (int r = 0; r < repeats; ++r) matrix.Multiply(input, t, output);
                 double seconds = stopwatch.Elapsed.TotalSeconds / repeats;

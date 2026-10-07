@@ -20,7 +20,7 @@ for name, n, k in SHAPES:
         x = torch.randn(1, t, k)
         with torch.inference_mode():
             linear(x)
-            repeats = max(2, int(4e9 / (2 * t * n * k)))
+            repeats = max(3, int(2e10 / (2 * t * n * k)))
             start = time.perf_counter()
             for _ in range(repeats):
                 linear(x)

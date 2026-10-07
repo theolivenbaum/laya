@@ -133,35 +133,31 @@ public sealed class BFloat16Matrix
         int groups = (rows + lanes - 1) / lanes;
         int paddedRows = groups * lanes;
         int k = InFeatures;
-        float[] packed = ArrayPool<float>.Shared.Rent(groups * k * lanes);
-        try
+        // The packed activations live in a per-thread pinned buffer that is kept between calls: at
+        // d1's sizes it is 5-26 MB, past what ArrayPool retains, and a fresh one per call was paid
+        // for in page faults on every projection.
+        float* a = Pinned(ref t_packed, groups * k * lanes);
+        fixed (ushort* weights = _data)
+        fixed (float* inputPointer = input, outputPointer = output)
         {
-            fixed (ushort* weights = _data)
-            fixed (float* inputPointer = input, outputPointer = output, a = packed)
+            PackRows(inputPointer, rows, inputStride, a, groups, lanes);
+
+            int blockColumns = Math.Max(PanelWidth, BlockColumns);
+            int blocks = (OutFeatures + blockColumns - 1) / blockColumns;
+            int workers = LayaRuntime.WorkersOf(parallel);
+            if (workers <= 1 || blocks == 1 || (long)rows * OutFeatures * InFeatures <= 4_000_000)
             {
-                PackRows(inputPointer, rows, inputStride, a, groups, lanes);
-
-                int blockColumns = Math.Max(PanelWidth, BlockColumns);
-                int blocks = (OutFeatures + blockColumns - 1) / blockColumns;
-                int workers = LayaRuntime.WorkersOf(parallel);
-                if (workers <= 1 || blocks == 1 || (long)rows * OutFeatures * InFeatures <= 4_000_000)
+                for (int block = 0; block < blocks; ++block)
                 {
-                    for (int block = 0; block < blocks; ++block)
-                    {
-                        Block(weights, a, groups, rows, paddedRows, outputPointer, outputStride, block * blockColumns, blockColumns);
-                    }
-                    return;
+                    Block(weights, a, groups, rows, paddedRows, outputPointer, outputStride, block * blockColumns, blockColumns);
                 }
-
-                nint w = (nint)weights, packedAddress = (nint)a, o = (nint)outputPointer;
-                Parallel.For(0, blocks, LayaRuntime.Resolve(parallel), block =>
-                    Block((ushort*)w, (float*)packedAddress, groups, rows, paddedRows, (float*)o, outputStride,
-                        block * blockColumns, blockColumns));
+                return;
             }
-        }
-        finally
-        {
-            ArrayPool<float>.Shared.Return(packed);
+
+            nint w = (nint)weights, packedAddress = (nint)a, o = (nint)outputPointer;
+            Parallel.For(0, blocks, LayaRuntime.Resolve(parallel), block =>
+                Block((ushort*)w, (float*)packedAddress, groups, rows, paddedRows, (float*)o, outputStride,
+                    block * blockColumns, blockColumns));
         }
     }
 
@@ -272,6 +268,7 @@ public sealed class BFloat16Matrix
         }
     }
 
+    [ThreadStatic] private static float[]? t_packed;
     [ThreadStatic] private static float[]? t_widened;
     [ThreadStatic] private static float[]? t_columns;
 
