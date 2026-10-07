@@ -53,7 +53,7 @@ CASES = {
     # a large picture: a 2 x 1 grid of tiles and a thumbnail, with text, two questions (the tree)
     "tiled": ((1100, 600, 2), "A photo sent by a customer.", {"red": RED, "shape": CATS}),
     # over a megapixel: Pillow shrinks it first, then tiles
-    "capped": ((1400, 1000, 3), None, {"bright": BRIGHT}),
+    "capped": ((1060, 1000, 3), None, {"bright": BRIGHT}),
 }
 
 
