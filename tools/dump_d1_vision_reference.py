@@ -3,7 +3,7 @@
 scattered features), so ``Laya.D1`` can be checked layer by layer.
 
 The pictures are synthetic and deterministic (gradients, shapes and noise drawn with Pillow) and are
-written next to the dump as binary PPM files, so the .NET test reads exactly the pixels the reference
+written as PNG files, so the .NET test reads exactly the pixels the reference
 saw. Three sizes exercise the three branches of the processor: a small picture resized whole, a
 large one cut into 512-pixel tiles plus a thumbnail, and one over ``VISION_MAX_PIXELS`` that
 ``cap_pixels`` first shrinks with Pillow.
@@ -57,10 +57,8 @@ CASES = {
 }
 
 
-def write_ppm(path, image):
-    with open(path, "wb") as f:
-        f.write(f"P6\n{image.width} {image.height}\n255\n".encode())
-        f.write(np.asarray(image.convert("RGB"), dtype=np.uint8).tobytes())
+def write_png(path, image):
+    image.convert("RGB").save(path, optimize=True)   # lossless: the .NET test decodes the same pixels
 
 
 def prompts(engine, state, questions):
@@ -163,7 +161,7 @@ def main():
     parser.add_argument("--out", default="artifacts/dumps/d1-vision")
     parser.add_argument("--fixture", default=None)
     parser.add_argument("--images", default="tests/Laya.Tests/Fixtures/d1-images",
-                        help="where the synthetic pictures are written (as PPM)")
+                        help="where the synthetic pictures are written (as PNG)")
     parser.add_argument("--sample", type=int, default=32)
     args = parser.parse_args()
 
@@ -184,7 +182,7 @@ def main():
     phase_one = {}
     for name, ((w, h, seed), state, questions) in CASES.items():
         image = picture(w, h, seed)
-        write_ppm(os.path.join(args.images, f"{name}.ppm"), image)
+        write_png(os.path.join(args.images, f"{name}.png"), image)
         phase_one[name] = (image,) + vision_case(model, engine, state, questions, image)
         print(f"{name}: vision done, tiles {phase_one[name][3]['spatial_shapes']}", flush=True)
 
@@ -200,7 +198,7 @@ def main():
         lm_tensors, meta = text_case(model, engine, state, questions, image, features)
         tensors.update(lm_tensors)
         meta.update(vision_meta)
-        meta["image"] = f"{name}.ppm"
+        meta["image"] = f"{name}.png"
         save_file(tensors, os.path.join(args.out, f"{name}.safetensors"))
         all_meta[name] = meta
         for key, value in tensors.items():
