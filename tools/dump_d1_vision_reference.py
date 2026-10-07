@@ -63,66 +63,86 @@ def write_ppm(path, image):
         f.write(np.asarray(image.convert("RGB"), dtype=np.uint8).tobytes())
 
 
-def run_case(model, engine, state, questions, image):
+def prompts(engine, state, questions):
     prompt = sys.modules[type(engine).__module__.replace("runner", "prompt")]
-    runner = sys.modules[type(engine).__module__]
     qs = [prompt.as_question(q) for q in questions.values()]
-    tok = engine.tokenizer
-    pics = [runner.cap_pixels(image)]
-    prefix = prompt.prefix_text(tok, state, engine.bos, engine.state_style, engine.system, engine._image_markup(1))
-    suffixes = [prompt.suffix_text(tok, q, engine.lead, engine.option_style) for q in qs]
+    prefix = prompt.prefix_text(engine.tokenizer, state, engine.bos, engine.state_style, engine.system,
+                                engine._image_markup(1))
+    suffixes = [prompt.suffix_text(engine.tokenizer, q, engine.lead, engine.option_style) for q in qs]
+    return qs, prefix, suffixes
 
-    tensors = {}
+
+def vision_case(model, engine, state, questions, image):
+    """Phase one: the processor, the tower and the projector, every tile's tensors and the features."""
+    runner = sys.modules[type(engine).__module__]
+    qs, prefix, suffixes = prompts(engine, state, questions)
+    pics = [runner.cap_pixels(image)]
+    inputs = engine._image_inputs(prefix + suffixes[0] if len(qs) == 1 else prefix, pics)
+
     tower = getattr(model.model.vision_tower, "vision_model", model.model.vision_tower)
-    tower_store = {}
-    handles = []
+    store, handles = {}, []
 
     def hook(name):
         def fn(_m, _i, output):
-            tower_store[name] = (output[0] if isinstance(output, tuple) else output).detach().float().clone()
+            store[name] = (output[0] if isinstance(output, tuple) else output).detach().float().clone()
         return fn
 
     handles.append(tower.embeddings.register_forward_hook(hook("embeddings")))
     for i, layer in enumerate(tower.encoder.layers):
         handles.append(layer.register_forward_hook(hook(f"layers.{i}.output")))
     handles.append(tower.post_layernorm.register_forward_hook(hook("post_layernorm")))
-    projected = []
-    handles.append(model.model.multi_modal_projector.register_forward_hook(
-        lambda _m, _i, out: projected.append(out.detach().float().reshape(-1, out.shape[-1]).clone())))
+    try:
+        with torch.inference_mode():
+            features = model.model.get_image_features(
+                pixel_values=inputs["pixel_values"], spatial_shapes=inputs["spatial_shapes"],
+                pixel_attention_mask=inputs["pixel_attention_mask"]).pooler_output
+    finally:
+        for h in handles:
+            h.remove()
 
-    store, lm_handles = capture(model)
+    tensors = {}
+    mask, pixels = inputs["pixel_attention_mask"], inputs["pixel_values"]
+    for t in range(pixels.shape[0]):
+        valid = int(mask[t].sum())
+        tensors[f"image0.tile{t}.patches"] = pixels[t, :valid].float().contiguous()
+        tensors[f"image0.tile{t}.embeddings"] = store["embeddings"][t, :valid].contiguous()
+        for i in range(len(tower.encoder.layers)):
+            tensors[f"image0.tile{t}.layers.{i}.output"] = store[f"layers.{i}.output"][t, :valid].contiguous()
+        tensors[f"image0.tile{t}.post_layernorm"] = store["post_layernorm"][t, :valid].contiguous()
+        tensors[f"image0.tile{t}.projected"] = features[t].float().contiguous()
+    meta = {"spatial_shapes": inputs["spatial_shapes"].tolist(), "capped_size": [pics[0].width, pics[0].height]}
+    return tensors, [f.float().clone() for f in features], meta
+
+
+def text_case(model, engine, state, questions, image, features):
+    """Phase two: the language model in fp32 over the features phase one computed."""
+    from transformers.modeling_outputs import BaseModelOutputWithPooling
+
+    runner = sys.modules[type(engine).__module__]
+    qs, prefix, suffixes = prompts(engine, state, questions)
+    tok = engine.tokenizer
+    pics = [runner.cap_pixels(image)]
+    model.model.get_image_features = lambda **_: BaseModelOutputWithPooling(pooler_output=list(features))
+
+    store, handles = capture(model)
     try:
         with torch.inference_mode():
             if len(qs) == 1:
                 inputs = engine._image_inputs(prefix + suffixes[0], pics)
-                ids = inputs["input_ids"][0].tolist()
-                trunk, rows = None, [ids]
+                trunk, rows = None, [inputs["input_ids"][0].tolist()]
                 row = engine._one_pass(**inputs, logits_to_keep=1).logits[0, -1].float()
                 logz = [row - torch.logsumexp(row, dim=-1)]
             else:
                 vision = engine._image_inputs(prefix, pics)
-                inputs = dict(vision)
                 trunk = vision.pop("input_ids")[0].tolist()
                 vision.pop("attention_mask", None)
                 rows = [tok.encode(s, add_special_tokens=False) for s in suffixes]
                 logz = engine._tree_logz(trunk, rows, **vision)
     finally:
-        for h in handles + lm_handles:
+        for h in handles:
             h.remove()
 
-    mask = inputs["pixel_attention_mask"]
-    shapes = inputs["spatial_shapes"].tolist()
-    pixels = inputs["pixel_values"]
-    for t in range(pixels.shape[0]):
-        valid = int(mask[t].sum())
-        tensors[f"image0.tile{t}.patches"] = pixels[t, :valid].float().contiguous()
-        tensors[f"image0.tile{t}.embeddings"] = tower_store["embeddings"][t, :valid].contiguous()
-        for i in range(len(tower.encoder.layers)):
-            tensors[f"image0.tile{t}.layers.{i}.output"] = tower_store[f"layers.{i}.output"][t, :valid].contiguous()
-        tensors[f"image0.tile{t}.post_layernorm"] = tower_store["post_layernorm"][t, :valid].contiguous()
-        tensors[f"image0.tile{t}.projected"] = projected[t].contiguous()
-
-    tensors.update({k: squeeze(v).contiguous() for k, v in store.items()})
+    tensors = {k: squeeze(v).contiguous() for k, v in store.items()}
     probabilities = []
     for i, (q, z) in enumerate(zip(qs, logz)):
         tensors[f"logz.{i}"] = z.float().contiguous()
@@ -131,12 +151,9 @@ def run_case(model, engine, state, questions, image):
         tensors[f"probabilities.{i}"] = torch.tensor(probs, dtype=torch.float32)
 
     result = model.system_one(state, questions, images=[image])
-    meta = {
-        "state": state, "questions": questions, "prefix": prefix, "suffixes": suffixes,
-        "ids": rows, "trunk": trunk, "spatial_shapes": shapes,
-        "capped_size": [pics[0].width, pics[0].height],
-        "probabilities": probabilities, "answers": result["answers"], "usage": result["usage"],
-    }
+    meta = {"state": state, "questions": questions, "prefix": prefix, "suffixes": suffixes,
+            "ids": rows, "trunk": trunk, "probabilities": probabilities,
+            "answers": result["answers"], "usage": result["usage"]}
     return tensors, meta
 
 
@@ -152,18 +169,37 @@ def main():
 
     from transformers import AutoModel
 
+    # Everything computes in fp32, as on CPU, but the whole model in fp32 (12.5 GB) does not fit
+    # beside its activations in a 13 GB container: phase one runs the tower and the projector in fp32
+    # with the language model still bf16, phase two drops the tower, widens the language model, and
+    # replays phase one's features through get_image_features.
     model = AutoModel.from_pretrained(args.model_dir, trust_remote_code=True, dtype=torch.bfloat16)
-    model.float()   # everything in fp32, as on CPU
+    model.model.vision_tower.float()
+    model.model.multi_modal_projector.float()
     model.eval()
     engine = model.engine
 
     os.makedirs(args.out, exist_ok=True)
     os.makedirs(args.images, exist_ok=True)
-    all_meta, records = {}, []
+    phase_one = {}
     for name, ((w, h, seed), state, questions) in CASES.items():
         image = picture(w, h, seed)
         write_ppm(os.path.join(args.images, f"{name}.ppm"), image)
-        tensors, meta = run_case(model, engine, state, questions, image)
+        phase_one[name] = (image,) + vision_case(model, engine, state, questions, image)
+        print(f"{name}: vision done, tiles {phase_one[name][3]['spatial_shapes']}", flush=True)
+
+    model.model.vision_tower = None
+    import gc
+    gc.collect()
+    model.model.language_model.float()
+    model.lm_head.float()
+
+    all_meta, records = {}, []
+    for name, ((w, h, seed), state, questions) in CASES.items():
+        image, tensors, features, vision_meta = phase_one.pop(name)
+        lm_tensors, meta = text_case(model, engine, state, questions, image, features)
+        tensors.update(lm_tensors)
+        meta.update(vision_meta)
         meta["image"] = f"{name}.ppm"
         save_file(tensors, os.path.join(args.out, f"{name}.safetensors"))
         all_meta[name] = meta
