@@ -229,7 +229,7 @@ internal static class Program
         var questions = ReadQuestions(options);
 
         var recorder = new StateRecorder();
-        var result = agent.SystemOne(state, questions, recorder);
+        var result = Run(agent, state, questions, recorder);
 
         string output = options.Value("out") ?? "artifacts/dumps/dotnet.json";
         string answersJson = JsonSerializer.Serialize(
@@ -288,7 +288,20 @@ internal static class Program
         return catalogue[name];
     }
 
-    private static Agent OpenAgent(CommandLine options) => Agent.FromDirectory(ModelDirectory(options));
+    /// <summary>A laya checkpoint, or d1 when the directory holds an LFM2-VL one.</summary>
+    private static IDecisionEngine OpenAgent(CommandLine options)
+    {
+        string directory = ModelDirectory(options);
+        return D1.D1Agent.IsCheckpoint(directory) ? D1.D1Agent.FromDirectory(directory) : Agent.FromDirectory(directory);
+    }
+
+    private static DecisionResult Run(IDecisionEngine engine, object? state, QuestionSet questions, IStateRecorder? recorder)
+        => engine switch
+        {
+            Agent agent => agent.SystemOne(state, questions, recorder),
+            D1.D1Agent d1 => d1.SystemOne(state, questions, recorder),
+            _ => engine.SystemOne(state, questions),
+        };
 
     private static string ModelDirectory(CommandLine options)
         => options.Value("model-dir") is string directory ? directory : DownloadCheckpoint(options);

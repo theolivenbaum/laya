@@ -24,7 +24,9 @@ namespace Laya.D1;
 /// var result = d1.SystemOne("I was charged twice", Presets.Triage());
 /// </code>
 ///
-/// <para>This port covers text states; d1's image input (the SigLIP2 tower) is not implemented.</para>
+/// <para>Pictures are part of the state: <see cref="SystemOne(object?, QuestionSet, IReadOnlyList{RgbImage}, IStateRecorder?, ParallelOptions?)"/>
+/// runs them through the SigLIP2 tower and the projector (<see cref="D1Vision"/>, loaded on first
+/// use) and scatters the result into the prompt's <c>&lt;image&gt;</c> slots.</para>
 /// </summary>
 public sealed class D1Agent : IDecisionEngine
 {
@@ -32,7 +34,8 @@ public sealed class D1Agent : IDecisionEngine
     public const string DefaultRepository = "LiquidAI/d1-3B";
 
     /// <summary>The files a text-only d1 run needs; the vision tower lives in the same safetensors.</summary>
-    public static readonly string[] CheckpointFiles = ["config.json", "model.safetensors", "tokenizer.json", "tokenizer_config.json"];
+    public static readonly string[] CheckpointFiles =
+        ["config.json", "model.safetensors", "tokenizer.json", "tokenizer_config.json", "processor_config.json"];
 
     /// <summary>Rows of branches packed into one pass, as <c>SystemOne(token_budget=65536)</c>.</summary>
     public int TokenBudget { get; init; } = 65536;
@@ -44,6 +47,16 @@ public sealed class D1Agent : IDecisionEngine
     public string ModelDirectory { get; }
     public string ModelName { get; }
 
+    public D1ImageProcessor ImageProcessor { get; }
+
+    /// <summary>The <c>&lt;image&gt;</c> token whose embeddings image features replace.</summary>
+    public int ImageTokenId { get; }
+
+    private readonly Lazy<D1Vision> _vision;
+
+    /// <summary>The vision tower and projector, loaded from the checkpoint on first use.</summary>
+    public D1Vision Vision => _vision.Value;
+
     private D1Agent(string directory, Lfm2Config config, HuggingFaceTokenizer tokenizer, Lfm2LanguageModel model, string bos)
     {
         ModelDirectory = directory;
@@ -52,6 +65,20 @@ public sealed class D1Agent : IDecisionEngine
         Model = model;
         Prompt = new D1Prompt(tokenizer, bos);
         ModelName = Path.GetFileName(Path.TrimEndingDirectorySeparator(Path.GetFullPath(directory)));
+        ImageProcessor = D1ImageProcessor.FromDirectory(directory);
+
+        using var document = JsonDocument.Parse(File.ReadAllBytes(Path.Combine(directory, "config.json")));
+        var root = document.RootElement.Clone();
+        ImageTokenId = root.TryGetProperty("image_token_id", out var image) ? image.GetInt32() : tokenizer.IdOf(D1ImageProcessor.ImageToken);
+        _vision = new Lazy<D1Vision>(() =>
+        {
+            if (!root.TryGetProperty("vision_config", out _))
+            {
+                throw new NotSupportedException($"'{directory}' is a text-only checkpoint; it has no vision tower.");
+            }
+            using var weights = new SafetensorsFile(Path.Combine(directory, "model.safetensors"));
+            return new D1Vision(root, weights);
+        }, LazyThreadSafetyMode.ExecutionAndPublication);
     }
 
     /// <summary>True when <paramref name="directory"/> holds a d1 / LFM2(-VL) checkpoint rather than a laya one.</summary>
@@ -143,6 +170,27 @@ public sealed class D1Agent : IDecisionEngine
         return Result(answers, read);
     }
 
+    /// <summary>
+    /// Answers every question about <paramref name="state"/> and <paramref name="images"/> together;
+    /// the state may be null when the pictures are the whole state.
+    /// </summary>
+    public DecisionResult SystemOne(object? state, QuestionSet questions, IReadOnlyList<RgbImage> images,
+        IStateRecorder? recorder = null, ParallelOptions? parallel = null)
+    {
+        ArgumentNullException.ThrowIfNull(questions);
+        ArgumentNullException.ThrowIfNull(images);
+        var list = questions.ToArray();
+        var answers = new List<KeyValuePair<string, Answer>>(list.Length);
+        if (list.Length == 0) return Result(answers, 0);
+
+        var probabilities = Probabilities(state, [.. list.Select(q => q.Value)], images, recorder, parallel, out int read);
+        for (int i = 0; i < list.Length; ++i)
+        {
+            answers.Add(new(list[i].Key, BuildAnswer(list[i].Value, probabilities[i])));
+        }
+        return Result(answers, read);
+    }
+
     /// <inheritdoc cref="SystemOne(object?, QuestionSet, IStateRecorder?, ParallelOptions?)"/>
     public DecisionResult Predict(object? state, QuestionSet questions, ParallelOptions? parallel = null)
         => SystemOne(state, questions, recorder: null, parallel);
@@ -160,19 +208,52 @@ public sealed class D1Agent : IDecisionEngine
     /// </summary>
     public double[][] Probabilities(object? state, IReadOnlyList<Question> questions, IStateRecorder? recorder,
         ParallelOptions? parallel, out int tokensRead)
+        => Probabilities(state, questions, [], recorder, parallel, out tokensRead);
+
+    /// <inheritdoc cref="Probabilities(object?, IReadOnlyList{Question}, IStateRecorder?, ParallelOptions?, out int)"/>
+    public double[][] Probabilities(object? state, IReadOnlyList<Question> questions, IReadOnlyList<RgbImage> images,
+        IStateRecorder? recorder, ParallelOptions? parallel, out int tokensRead)
     {
         var result = new double[questions.Count][];
+
+        // Pictures: the chat template writes one <image> each at the head of the user turn, and the
+        // processor expands each into its tiles' placeholder tokens.
+        string markup = string.Concat(Enumerable.Repeat(D1ImageProcessor.ImageToken, images.Count));
+        var processed = images.Select(ImageProcessor.Process).ToArray();
+        string Expand(string text)
+        {
+            if (processed.Length == 0) return text;
+            var builder = new System.Text.StringBuilder();
+            int from = 0, next = 0;
+            int at;
+            while (next < processed.Length && (at = text.IndexOf(D1ImageProcessor.ImageToken, from, StringComparison.Ordinal)) >= 0)
+            {
+                builder.Append(text, from, at - from).Append(processed[next++].Placeholder);
+                from = at + D1ImageProcessor.ImageToken.Length;
+            }
+            return builder.Append(text, from, text.Length - from).ToString();
+        }
+        float[]? features = null;
+        if (processed.Length > 0)
+        {
+            using (ForwardTiming.Measure("vision"))
+            {
+                features = [.. processed.SelectMany((image, i) => Vision.Embed(image, recorder, $"image{i}", parallel))];
+            }
+        }
+
+        string prefix = Prompt.Prefix(state, markup);
         if (questions.Count == 1)
         {
-            var ids = Tokenizer.Encode(Prompt.Render(state, questions[0]));
-            recorder?.Record("input_ids", [.. ids.Select(i => (float)i)], [ids.Count]);
-            var hidden = Model.Forward([.. ids], Lfm2Tree.Chain(ids.Count), recorder, parallel);
+            var ids = Tokenizer.Encode(Expand(prefix + Prompt.Suffix(questions[0])));
+            var tree = Lfm2Tree.Chain(ids.Count);
+            var hidden = Run(ids, tree, features, recorder, parallel);
             result[0] = Readout(questions[0], hidden.AsSpan((ids.Count - 1) * Config.HiddenSize, Config.HiddenSize), recorder, 0, parallel);
             tokensRead = ids.Count;
             return result;
         }
 
-        var trunk = Tokenizer.Encode(Prompt.Prefix(state));
+        var trunk = Tokenizer.Encode(Expand(prefix));
         var branches = questions.Select(q => Tokenizer.Encode(Prompt.Suffix(q))).ToArray();
         tokensRead = trunk.Count + branches.Sum(b => b.Count);
 
@@ -182,8 +263,7 @@ public sealed class D1Agent : IDecisionEngine
             ids.AddRange(trunk);
             foreach (int i in chunk) ids.AddRange(branches[i]);
             var tree = Lfm2Tree.Branched(trunk.Count, [.. chunk.Select(i => branches[i].Count)]);
-            recorder?.Record("input_ids", [.. ids.Select(i => (float)i)], [ids.Count]);
-            var hidden = Model.Forward([.. ids], tree, recorder, parallel);
+            var hidden = Run(ids, tree, features, recorder, parallel);
             for (int j = 0; j < chunk.Count; ++j)
             {
                 int q = chunk[j];
@@ -192,6 +272,34 @@ public sealed class D1Agent : IDecisionEngine
             }
         }
         return result;
+    }
+
+    /// <summary>
+    /// Embeds <paramref name="ids"/>, scatters the image features into the <c>&lt;image&gt;</c> rows
+    /// in order (<c>masked_scatter</c>), and runs the stack.
+    /// </summary>
+    private float[] Run(List<int> ids, Lfm2Tree tree, float[]? features, IStateRecorder? recorder, ParallelOptions? parallel)
+    {
+        recorder?.Record("input_ids", [.. ids.Select(i => (float)i)], [ids.Count]);
+        int d = Config.HiddenSize;
+        int slots = ids.Count(id => id == ImageTokenId);
+        int available = features is null ? 0 : features.Length / d;
+        if (slots != available)
+        {
+            throw new InvalidOperationException(
+                $"Image features and image tokens do not match, tokens: {slots}, features: {available}");
+        }
+        if (features is null) return Model.Forward([.. ids], tree, recorder, parallel);
+
+        var hidden = new float[ids.Count * d];
+        for (int t = 0; t < ids.Count; ++t) Model.Embedding(ids[t], hidden.AsSpan(t * d, d));
+        recorder?.Record("embeddings", hidden, [ids.Count, d]);
+        int next = 0;
+        for (int t = 0; t < ids.Count; ++t)
+        {
+            if (ids[t] == ImageTokenId) features.AsSpan(next++ * d, d).CopyTo(hidden.AsSpan(t * d, d));
+        }
+        return Model.Run(hidden, tree, recorder, parallel);
     }
 
     /// <summary><c>_plan</c>: consecutive groups of at most <see cref="TokenBudget"/> branch tokens.</summary>

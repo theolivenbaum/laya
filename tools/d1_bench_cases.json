@@ -1,0 +1,70 @@
+{
+ "one": {
+  "state": "I was charged twice this month, please refund one of them.",
+  "questions": {
+   "team": {
+    "type": "choice",
+    "instructions": "Which team should handle this?",
+    "criteria": {
+     "billing": "Charges, refunds, invoices",
+     "technical": "App or site faults",
+     "fraud": "Suspected unauthorised use"
+    }
+   }
+  }
+ },
+ "three": {
+  "state": "I was charged twice this month, please refund one of them.",
+  "questions": {
+   "refund": {
+    "type": "noul",
+    "instructions": "Is the customer asking for a refund?"
+   },
+   "team": {
+    "type": "choice",
+    "instructions": "Which team should handle this?",
+    "criteria": {
+     "billing": "Charges, refunds, invoices",
+     "technical": "App or site faults",
+     "fraud": "Suspected unauthorised use"
+    }
+   },
+   "urgency": {
+    "type": "score",
+    "instructions": "How urgent is this?",
+    "criteria": [
+     "Can wait",
+     "Today",
+     "Blocking the customer now"
+    ]
+   }
+  }
+ },
+ "long": {
+  "state": "Hello support team, I have been a customer for several years and I am writing because the latest update of your mobile application has caused a number of problems on my account. After installing version 4.2 the app logs me out every few minutes, the settings page crashes as soon as I open it, and yesterday I noticed that my monthly subscription was billed twice on my credit card statement. I tried reinstalling the application, clearing the cache and resetting my password, but nothing helped.  Hello support team, I have been a customer for several years and I am writing because the latest update of your mobile application has caused a number of problems on my account. After installing version 4.2 the app logs me out every few minutes, the settings page crashes as soon as I open it, and yesterday I noticed that my monthly subscription was billed twice on my credit card statement. I tried reinstalling the application, clearing the cache and resetting my password, but nothing helped.  Hello support team, I have been a customer for several years and I am writing because the latest update of your mobile application has caused a number of problems on my account. After installing version 4.2 the app logs me out every few minutes, the settings page crashes as soon as I open it, and yesterday I noticed that my monthly subscription was billed twice on my credit card statement. I tried reinstalling the application, clearing the cache and resetting my password, but nothing helped.  Hello support team, I have been a customer for several years and I am writing because the latest update of your mobile application has caused a number of problems on my account. After installing version 4.2 the app logs me out every few minutes, the settings page crashes as soon as I open it, and yesterday I noticed that my monthly subscription was billed twice on my credit card statement. I tried reinstalling the application, clearing the cache and resetting my password, but nothing helped.  Hello support team, I have been a customer for several years and I am writing because the latest update of your mobile application has caused a number of problems on my account. After installing version 4.2 the app logs me out every few minutes, the settings page crashes as soon as I open it, and yesterday I noticed that my monthly subscription was billed twice on my credit card statement. I tried reinstalling the application, clearing the cache and resetting my password, but nothing helped. ",
+  "questions": {
+   "refund": {
+    "type": "noul",
+    "instructions": "Is the customer asking for a refund?"
+   },
+   "team": {
+    "type": "choice",
+    "instructions": "Which team should handle this?",
+    "criteria": {
+     "billing": "Charges, refunds, invoices",
+     "technical": "App or site faults",
+     "fraud": "Suspected unauthorised use"
+    }
+   },
+   "urgency": {
+    "type": "score",
+    "instructions": "How urgent is this?",
+    "criteria": [
+     "Can wait",
+     "Today",
+     "Blocking the customer now"
+    ]
+   }
+  }
+ }
+}

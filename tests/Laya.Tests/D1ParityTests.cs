@@ -56,31 +56,54 @@ public class D1ParityTests(ITestOutputHelper output, D1ParityTests.Loaded loaded
     [D1ModelFact]
     public void MultilingualTreeMatchesPyTorch() => Compare("ruling");
 
+    /// <summary>A picture that fits, resized whole; the picture is the whole state; one question.</summary>
+    [D1ModelFact]
+    public void SmallImageMatchesPyTorch() => Compare("small", vision: true);
+
+    /// <summary>A large picture: two 512-pixel tiles and a thumbnail, plus text, two questions (the tree).</summary>
+    [D1ModelFact]
+    public void TiledImageMatchesPyTorch() => Compare("tiled", vision: true);
+
+    /// <summary>Over a megapixel: Pillow's bicubic shrinks it first, then it is tiled.</summary>
+    [D1ModelFact]
+    public void CappedImageMatchesPyTorch() => Compare("capped", vision: true);
+
     private D1Agent Agent => loaded.Agent!;
 
-    private void Compare(string name)
+    private void Compare(string name, bool vision = false)
     {
-        string fixturePath = Path.Combine(TestModels.FixtureRoot, "torch-d1.json");
+        string fixturePath = Path.Combine(TestModels.FixtureRoot, vision ? "torch-d1-vision.json" : "torch-d1.json");
         Assert.True(File.Exists(fixturePath), $"missing parity fixture {fixturePath}");
         using var fixture = JsonDocument.Parse(File.ReadAllText(fixturePath));
         var meta = fixture.RootElement.GetProperty("cases").GetProperty(name);
 
-        object? state = meta.GetProperty("state") is { ValueKind: JsonValueKind.String } text
-            ? text.GetString()
-            : meta.GetProperty("state").Clone();
+        object? state = meta.GetProperty("state") switch
+        {
+            { ValueKind: JsonValueKind.String } text => text.GetString(),
+            { ValueKind: JsonValueKind.Null } => null,
+            var other => other.Clone(),
+        };
         var questions = QuestionJson.Parse(meta.GetProperty("questions"));
+        var questionList = questions.Select(q => q.Value).ToArray();
 
         // The prompt first: every format string of prompt.py, and the tokenizer under it.
-        var prompts = meta.GetProperty("prompts").EnumerateArray().Select(p => p.GetString()!).ToArray();
-        var questionList = questions.Select(q => q.Value).ToArray();
-        for (int i = 0; i < questionList.Length; ++i)
+        RgbImage[] images = [];
+        if (vision)
         {
-            Assert.Equal(prompts[i], Agent.Prompt.Render(state, questionList[i]));
+            images = [RgbImage.Load(Path.Combine(TestModels.FixtureRoot, "d1-images", meta.GetProperty("image").GetString()!))];
+            Assert.Equal(meta.GetProperty("prefix").GetString(), Agent.Prompt.Prefix(state, D1ImageProcessor.ImageToken));
+            var suffixes = meta.GetProperty("suffixes").EnumerateArray().Select(p => p.GetString()!).ToArray();
+            for (int i = 0; i < questionList.Length; ++i) Assert.Equal(suffixes[i], Agent.Prompt.Suffix(questionList[i]));
+        }
+        else
+        {
+            var prompts = meta.GetProperty("prompts").EnumerateArray().Select(p => p.GetString()!).ToArray();
+            for (int i = 0; i < questionList.Length; ++i) Assert.Equal(prompts[i], Agent.Prompt.Render(state, questionList[i]));
         }
         int[] expectedIds = ExpectedIds(meta);
 
         var recorder = new StateRecorder();
-        var result = Agent.SystemOne(state, questions, recorder);
+        var result = vision ? Agent.SystemOne(state, questions, images, recorder) : Agent.SystemOne(state, questions, recorder);
         var actual = recorder.States.ToDictionary(s => s.Name, s => s, StringComparer.Ordinal);
 
         Assert.Equal(expectedIds, actual["input_ids"].Values.Select(v => (int)v).ToArray());
@@ -88,7 +111,7 @@ public class D1ParityTests(ITestOutputHelper output, D1ParityTests.Loaded loaded
 
         var failures = new List<string>();
         int compared = 0;
-        string fullDump = Path.Combine(TestModels.RepositoryRoot, "artifacts", "dumps", "d1", name + ".safetensors");
+        string fullDump = Path.Combine(TestModels.RepositoryRoot, "artifacts", "dumps", vision ? "d1-vision" : "d1", name + ".safetensors");
         if (File.Exists(fullDump))
         {
             using var reference = new SafetensorsFile(fullDump);

@@ -57,6 +57,37 @@ public class TokenizerTests(ITestOutputHelper output)
         Assert.Empty(failures);
     }
 
+    /// <summary>
+    /// d1 (LFM2): byte-level BPE behind a regex <c>Split</c> pre-tokenizer, <c>ignore_merges</c>, and
+    /// the chat-template specials (<c>&lt;|im_start|&gt;</c>, …) carved out of the raw text.
+    /// </summary>
+    [D1ModelFact]
+    public void D1TokenizerMatchesTransformers()
+    {
+        string path = Path.Combine(TestModels.FixtureRoot, "tokenizer-d1.json");
+        var tokenizer = HuggingFaceTokenizer.FromDirectory(TestModels.D1Directory);
+        using var fixture = JsonDocument.Parse(File.ReadAllText(path));
+        Assert.Equal(fixture.RootElement.GetProperty("special").GetProperty("pad").GetInt32(), tokenizer.PadTokenId);
+
+        var failures = new List<string>();
+        int cases = 0;
+        foreach (var testCase in fixture.RootElement.GetProperty("cases").EnumerateArray())
+        {
+            string text = testCase.GetProperty("text").GetString()!;
+            int[] expected = [.. testCase.GetProperty("ids").EnumerateArray().Select(i => i.GetInt32())];
+            int[] actual = [.. tokenizer.Encode(text)];
+            if (!expected.AsSpan().SequenceEqual(actual))
+            {
+                failures.Add($"{JsonSerializer.Serialize(text)}\n    expected {string.Join(',', expected.Take(20))}"
+                    + $"\n    actual   {string.Join(',', actual.Take(20))}");
+            }
+            cases++;
+        }
+        output.WriteLine($"d1: {cases - failures.Count}/{cases} tokenizations matched");
+        foreach (string failure in failures) output.WriteLine(failure);
+        Assert.Empty(failures);
+    }
+
     [ModelFact("english")]
     public void ByteLevelDecodeRoundTrips()
     {
