@@ -3,6 +3,7 @@ using System.Numerics;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Runtime.Intrinsics;
+using System.Runtime.Intrinsics.X86;
 
 namespace Laya.Numerics;
 
@@ -172,22 +173,102 @@ public sealed class BFloat16Matrix
     private unsafe void PackRows(float* input, int rows, int inputStride, float* packed, int groups, int lanes)
     {
         int k = InFeatures;
+        uint** sources = stackalloc uint*[lanes];
         for (int g = 0; g < groups; ++g)
         {
             float* destination = packed + (long)g * k * lanes;
             int count = Math.Min(lanes, rows - g * lanes);
-            if (count < lanes) new Span<float>(destination, k * lanes).Clear();
-            for (int r = 0; r < count; ++r)
+            for (int r = 0; r < count; ++r) sources[r] = (uint*)(input + (long)(g * lanes + r) * inputStride);
+            int i = 0;
+            if (count == 16 && lanes == 16 && Avx512F.IsSupported)
             {
-                float* source = input + (long)(g * lanes + r) * inputStride;
-                float* d = destination + r;
-                uint* bits = (uint*)source;
-                for (int i = 0; i < k; ++i)
-                {
-                    uint value = bits[i];
-                    ((uint*)d)[(long)i * lanes] = (value & 0x7F800000u) == 0 ? value & 0x80000000u : value;
-                }
+                for (; i + 16 <= k; i += 16) Transpose16x16(sources, i, destination + (long)i * 16, 16);
             }
+            else if (count < lanes)
+            {
+                new Span<float>(destination, k * lanes).Clear();
+            }
+
+            // Step outer, row inner: the stores walk the destination sequentially, the reads are
+            // `count` sequential streams. Row outer made every store a new cache line.
+            uint* d = (uint*)destination + (long)i * lanes;
+            for (; i < k; ++i, d += lanes)
+            {
+                for (int r = 0; r < count; ++r) d[r] = Flush(sources[r][i]);
+            }
+        }
+    }
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static uint Flush(uint value) => (value & 0x7F800000u) == 0 ? value & 0x80000000u : value;
+
+    /// <summary>
+    /// Sixteen rows' steps <c>[i, i + 16)</c> into sixteen step-major vectors, in registers: pairwise
+    /// unpacks, 64-bit shuffles, then two rounds of 128-bit lane shuffles. Subnormals are flushed on
+    /// the way out.
+    /// </summary>
+    [MethodImpl(MethodImplOptions.AggressiveOptimization)]
+    private static unsafe void Transpose16x16(uint** rows, int i, float* destination, int destinationStride)
+    {
+        var r0 = Vector512.Load((float*)rows[0] + i); var r1 = Vector512.Load((float*)rows[1] + i);
+        var r2 = Vector512.Load((float*)rows[2] + i); var r3 = Vector512.Load((float*)rows[3] + i);
+        var r4 = Vector512.Load((float*)rows[4] + i); var r5 = Vector512.Load((float*)rows[5] + i);
+        var r6 = Vector512.Load((float*)rows[6] + i); var r7 = Vector512.Load((float*)rows[7] + i);
+        var r8 = Vector512.Load((float*)rows[8] + i); var r9 = Vector512.Load((float*)rows[9] + i);
+        var r10 = Vector512.Load((float*)rows[10] + i); var r11 = Vector512.Load((float*)rows[11] + i);
+        var r12 = Vector512.Load((float*)rows[12] + i); var r13 = Vector512.Load((float*)rows[13] + i);
+        var r14 = Vector512.Load((float*)rows[14] + i); var r15 = Vector512.Load((float*)rows[15] + i);
+
+        var t0 = Avx512F.UnpackLow(r0, r1); var t1 = Avx512F.UnpackHigh(r0, r1);
+        var t2 = Avx512F.UnpackLow(r2, r3); var t3 = Avx512F.UnpackHigh(r2, r3);
+        var t4 = Avx512F.UnpackLow(r4, r5); var t5 = Avx512F.UnpackHigh(r4, r5);
+        var t6 = Avx512F.UnpackLow(r6, r7); var t7 = Avx512F.UnpackHigh(r6, r7);
+        var t8 = Avx512F.UnpackLow(r8, r9); var t9 = Avx512F.UnpackHigh(r8, r9);
+        var t10 = Avx512F.UnpackLow(r10, r11); var t11 = Avx512F.UnpackHigh(r10, r11);
+        var t12 = Avx512F.UnpackLow(r12, r13); var t13 = Avx512F.UnpackHigh(r12, r13);
+        var t14 = Avx512F.UnpackLow(r14, r15); var t15 = Avx512F.UnpackHigh(r14, r15);
+
+        r0 = Avx512F.Shuffle(t0, t2, 0x44); r1 = Avx512F.Shuffle(t0, t2, 0xEE);
+        r2 = Avx512F.Shuffle(t1, t3, 0x44); r3 = Avx512F.Shuffle(t1, t3, 0xEE);
+        r4 = Avx512F.Shuffle(t4, t6, 0x44); r5 = Avx512F.Shuffle(t4, t6, 0xEE);
+        r6 = Avx512F.Shuffle(t5, t7, 0x44); r7 = Avx512F.Shuffle(t5, t7, 0xEE);
+        r8 = Avx512F.Shuffle(t8, t10, 0x44); r9 = Avx512F.Shuffle(t8, t10, 0xEE);
+        r10 = Avx512F.Shuffle(t9, t11, 0x44); r11 = Avx512F.Shuffle(t9, t11, 0xEE);
+        r12 = Avx512F.Shuffle(t12, t14, 0x44); r13 = Avx512F.Shuffle(t12, t14, 0xEE);
+        r14 = Avx512F.Shuffle(t13, t15, 0x44); r15 = Avx512F.Shuffle(t13, t15, 0xEE);
+
+        t0 = Avx512F.Shuffle4x128(r0, r4, 0x88); t1 = Avx512F.Shuffle4x128(r1, r5, 0x88);
+        t2 = Avx512F.Shuffle4x128(r2, r6, 0x88); t3 = Avx512F.Shuffle4x128(r3, r7, 0x88);
+        t4 = Avx512F.Shuffle4x128(r0, r4, 0xDD); t5 = Avx512F.Shuffle4x128(r1, r5, 0xDD);
+        t6 = Avx512F.Shuffle4x128(r2, r6, 0xDD); t7 = Avx512F.Shuffle4x128(r3, r7, 0xDD);
+        t8 = Avx512F.Shuffle4x128(r8, r12, 0x88); t9 = Avx512F.Shuffle4x128(r9, r13, 0x88);
+        t10 = Avx512F.Shuffle4x128(r10, r14, 0x88); t11 = Avx512F.Shuffle4x128(r11, r15, 0x88);
+        t12 = Avx512F.Shuffle4x128(r8, r12, 0xDD); t13 = Avx512F.Shuffle4x128(r9, r13, 0xDD);
+        t14 = Avx512F.Shuffle4x128(r10, r14, 0xDD); t15 = Avx512F.Shuffle4x128(r11, r15, 0xDD);
+
+        Store(Avx512F.Shuffle4x128(t0, t8, 0x88), destination + 0 * destinationStride);
+        Store(Avx512F.Shuffle4x128(t1, t9, 0x88), destination + 1 * destinationStride);
+        Store(Avx512F.Shuffle4x128(t2, t10, 0x88), destination + 2 * destinationStride);
+        Store(Avx512F.Shuffle4x128(t3, t11, 0x88), destination + 3 * destinationStride);
+        Store(Avx512F.Shuffle4x128(t4, t12, 0x88), destination + 4 * destinationStride);
+        Store(Avx512F.Shuffle4x128(t5, t13, 0x88), destination + 5 * destinationStride);
+        Store(Avx512F.Shuffle4x128(t6, t14, 0x88), destination + 6 * destinationStride);
+        Store(Avx512F.Shuffle4x128(t7, t15, 0x88), destination + 7 * destinationStride);
+        Store(Avx512F.Shuffle4x128(t0, t8, 0xDD), destination + 8 * destinationStride);
+        Store(Avx512F.Shuffle4x128(t1, t9, 0xDD), destination + 9 * destinationStride);
+        Store(Avx512F.Shuffle4x128(t2, t10, 0xDD), destination + 10 * destinationStride);
+        Store(Avx512F.Shuffle4x128(t3, t11, 0xDD), destination + 11 * destinationStride);
+        Store(Avx512F.Shuffle4x128(t4, t12, 0xDD), destination + 12 * destinationStride);
+        Store(Avx512F.Shuffle4x128(t5, t13, 0xDD), destination + 13 * destinationStride);
+        Store(Avx512F.Shuffle4x128(t6, t14, 0xDD), destination + 14 * destinationStride);
+        Store(Avx512F.Shuffle4x128(t7, t15, 0xDD), destination + 15 * destinationStride);
+
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        static void Store(Vector512<float> value, float* destination)
+        {
+            var bits = value.AsUInt32();
+            var subnormal = Vector512.Equals(bits & Vector512.Create(0x7F800000u), Vector512<uint>.Zero);
+            Vector512.ConditionalSelect(subnormal, bits & Vector512.Create(0x80000000u), bits).AsSingle().Store(destination);
         }
     }
 
@@ -273,20 +354,31 @@ public sealed class BFloat16Matrix
             }
         }
 
-        // [panel][group][column][lane] -> output[group · lanes + lane][first + panel · 12 + column]
+        // [panel][group][column][lane] -> output[group · lanes + lane][first + panel · 12 + column]:
+        // sixteen columns at a time through the register transpose when a whole group of 16 rows is
+        // there, the ragged edges element by element.
+        uint** columnVectors = stackalloc uint*[16];
         for (int g = 0; g < groups; ++g)
         {
             int count = Math.Min(lanes, rows - g * lanes);
-            for (int p = 0; p < panels; ++p)
+            float* rowsOut = output + (long)g * lanes * outputStride + first;
+            int j0 = 0;
+            if (count == 16 && lanes == 16 && Avx512F.IsSupported)
             {
-                float* tile = accumulated + ((long)p * groups + g) * PanelWidth * lanes;
-                int panelColumns = Math.Min(PanelWidth, columns - p * PanelWidth);
-                float* destination = output + (long)g * lanes * outputStride + first + p * PanelWidth;
-                for (int r = 0; r < count; ++r)
+                for (; j0 + 16 <= columns; j0 += 16)
                 {
-                    float* row = destination + (long)r * outputStride;
-                    for (int j = 0; j < panelColumns; ++j) row[j] = tile[j * lanes + r];
+                    for (int j = 0; j < 16; ++j)
+                    {
+                        int column = j0 + j;
+                        columnVectors[j] = (uint*)(accumulated + (((long)(column / PanelWidth) * groups + g) * PanelWidth + column % PanelWidth) * lanes);
+                    }
+                    Transpose16x16(columnVectors, 0, rowsOut + j0, outputStride);
                 }
+            }
+            for (int column = j0; column < columns; ++column)
+            {
+                float* source = accumulated + (((long)(column / PanelWidth) * groups + g) * PanelWidth + column % PanelWidth) * lanes;
+                for (int r = 0; r < count; ++r) rowsOut[(long)r * outputStride + column] = source[r];
             }
         }
     }
