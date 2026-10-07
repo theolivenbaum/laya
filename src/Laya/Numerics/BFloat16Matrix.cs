@@ -44,8 +44,12 @@ public sealed class BFloat16Matrix
     public int InFeatures { get; }
     public int OutFeatures { get; }
 
-    /// <summary>Reduction steps per block: the 32-row activation tile is BlockDepth x 32 x 4 bytes (16 KiB at 128), resident in L1.</summary>
-    public static int BlockDepth { get; set; } = ReadSetting("LAYA_GEMM_KC", 128);
+    /// <summary>
+    /// Reduction steps per block. Each block ends with the accumulators stored and the next starts by
+    /// reloading them, so longer is better until the 32-row activation tile (32 KiB at 256) and the
+    /// widened weight block stop fitting L1 and L2. Swept 64-512 on d1's shapes; 256 was best.
+    /// </summary>
+    public static int BlockDepth { get; set; } = ReadSetting("LAYA_GEMM_KC", 256);
 
     /// <summary>Output columns per block (a multiple of 12): the transposed accumulator is this many columns tall.</summary>
     public static int BlockColumns { get; set; } = ReadSetting("LAYA_GEMM_NC", 192) / PanelWidth * PanelWidth;
