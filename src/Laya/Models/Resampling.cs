@@ -2,9 +2,11 @@ namespace Laya.Models;
 
 /// <summary>
 /// The separable antialiased resamplers the d1 vision path needs, matched to the libraries the
-/// reference calls: PyTorch's <c>interpolate(..., antialias=True)</c> (bilinear for the SigLIP2
-/// position grid, bicubic for torchvision's image resize) and Pillow's uint8 <c>Image.resize</c>
-/// (bicubic, for the pixel cap <c>runner.cap_pixels</c> applies first).
+/// reference calls: PyTorch's float <c>interpolate(..., antialias=True)</c> (bilinear, for the
+/// SigLIP2 position grid), torchvision's uint8 bicubic resize (PyTorch's native int16 fixed-point
+/// kernel, for tiles and thumbnails) and Pillow's uint8 <c>Image.resize</c> (bicubic, 22-bit fixed
+/// point, for the pixel cap <c>runner.cap_pixels</c> applies first). The two uint8 resamplers were
+/// matched bit for bit against torchvision 0.29 and Pillow 12.
 ///
 /// <para>All three share one scheme: an output sample at <c>i</c> is centred on
 /// <c>(i + 0.5) · in / out</c> in input coordinates, and the filter is stretched by the scale when
@@ -123,65 +125,109 @@ public static class Resampling
     }
 
     /// <summary>
-    /// torchvision's <c>resize(uint8 image, (height, width), BICUBIC, antialias=True)</c>: the
-    /// pixels are resampled as floats with PyTorch's antialiased bicubic, then rounded half to even
-    /// and clamped back to bytes. <paramref name="rgb"/> is interleaved <c>[height, width, 3]</c>.
+    /// torchvision's <c>resize(uint8 image, (height, width), BICUBIC, antialias=True)</c> on CPU,
+    /// which runs PyTorch's native uint8 kernel (the Pillow-SIMD algorithm): double-precision taps
+    /// quantized to int16 with the largest precision that keeps the biggest tap below 2^15, a
+    /// rounding width pass to bytes, then the height pass. Matched to torchvision 0.29 bit for bit.
+    /// <paramref name="rgb"/> is interleaved <c>[height, width, 3]</c>.
     /// </summary>
     public static byte[] ResizeBicubicTorch(ReadOnlySpan<byte> rgb, int inHeight, int inWidth, int outHeight, int outWidth)
     {
-        const int channels = 3;
-        var across = TorchTaps(inWidth, outWidth, Filter.Bicubic);
-        var down = TorchTaps(inHeight, outHeight, Filter.Bicubic);
-        bool resizeWidth = inWidth != outWidth;
-        bool resizeHeight = inHeight != outHeight;
+        byte[] current = rgb.ToArray();
+        if (outWidth != inWidth)
+        {
+            var (start, count, taps, stride, precision) = Int16Taps(inWidth, outWidth);
+            current = Horizontal(current, inHeight, inWidth, outWidth, start, count, taps, stride, precision);
+        }
+        if (outHeight != inHeight)
+        {
+            var (start, count, taps, stride, precision) = Int16Taps(inHeight, outHeight);
+            current = Vertical(current, outWidth, outHeight, start, count, taps, stride, precision);
+        }
+        return current;
+    }
 
-        // width first, into a float plane
-        var horizontal = new float[inHeight * outWidth * channels];
-        for (int y = 0; y < inHeight; ++y)
+    /// <summary>PyTorch's <c>_compute_index_ranges_int16_weights</c> for the antialiased bicubic filter.</summary>
+    private static (int[] Start, int[] Count, int[] Taps, int Stride, int Precision) Int16Taps(int input, int output)
+    {
+        double scale = (double)input / output;
+        double support = scale >= 1.0 ? Support(Filter.Bicubic) * scale : Support(Filter.Bicubic);
+        double invScale = scale >= 1.0 ? 1.0 / scale : 1.0;
+        int stride = (int)Math.Ceiling(support) * 2 + 1;
+        var start = new int[output];
+        var count = new int[output];
+        var weights = new double[output * stride];
+        double maxWeight = double.NegativeInfinity;
+        for (int i = 0; i < output; ++i)
+        {
+            double center = scale * (i + 0.5);
+            int min = Math.Max((int)(center - support + 0.5), 0);
+            int size = Math.Min((int)(center + support + 0.5), input) - min;
+            double total = 0;
+            for (int j = 0; j < size; ++j)
+            {
+                double w = Evaluate(Filter.Bicubic, (j + min - center + 0.5) * invScale);
+                weights[i * stride + j] = w;
+                total += w;
+            }
+            for (int j = 0; j < size; ++j)
+            {
+                if (total != 0) weights[i * stride + j] /= total;
+                maxWeight = Math.Max(maxWeight, weights[i * stride + j]);
+            }
+            start[i] = min;
+            count[i] = size;
+        }
+
+        int precision = 0;
+        while (precision < 22 && (int)(0.5 + maxWeight * (1 << (precision + 1))) < (1 << 15)) precision++;
+        var taps = new int[output * stride];
+        for (int i = 0; i < taps.Length; ++i)
+        {
+            double v = weights[i] * (1 << precision);
+            taps[i] = (short)(v < 0 ? (int)(-0.5 + v) : (int)(0.5 + v));
+        }
+        return (start, count, taps, stride, precision);
+    }
+
+    private static byte[] Horizontal(byte[] source, int height, int inWidth, int outWidth, int[] start, int[] count, int[] taps,
+        int stride, int precision)
+    {
+        const int channels = 3;
+        var result = new byte[height * outWidth * channels];
+        for (int y = 0; y < height; ++y)
         {
             for (int x = 0; x < outWidth; ++x)
             {
                 for (int c = 0; c < channels; ++c)
                 {
-                    float sum;
-                    if (!resizeWidth)
+                    long sum = 1L << (precision - 1);
+                    for (int j = 0; j < count[x]; ++j)
                     {
-                        sum = rgb[(y * inWidth + x) * channels + c];
+                        sum += source[(y * inWidth + start[x] + j) * channels + c] * (long)taps[x * stride + j];
                     }
-                    else
-                    {
-                        sum = 0f;
-                        int start = across.Start[x];
-                        for (int j = 0; j < across.Count[x]; ++j)
-                        {
-                            sum += across.Weights[x * across.Stride + j] * rgb[(y * inWidth + start + j) * channels + c];
-                        }
-                    }
-                    horizontal[(y * outWidth + x) * channels + c] = sum;
+                    result[(y * outWidth + x) * channels + c] = (byte)Math.Clamp(sum >> precision, 0, 255);
                 }
             }
         }
+        return result;
+    }
 
-        var result = new byte[outHeight * outWidth * channels];
+    private static byte[] Vertical(byte[] source, int width, int outHeight, int[] start, int[] count, int[] taps, int stride,
+        int precision)
+    {
+        const int channels = 3;
+        var result = new byte[outHeight * width * channels];
         for (int y = 0; y < outHeight; ++y)
         {
-            for (int i = 0; i < outWidth * channels; ++i)
+            for (int i = 0; i < width * channels; ++i)
             {
-                float sum;
-                if (!resizeHeight)
+                long sum = 1L << (precision - 1);
+                for (int j = 0; j < count[y]; ++j)
                 {
-                    sum = horizontal[y * outWidth * channels + i];
+                    sum += source[(start[y] + j) * width * channels + i] * (long)taps[y * stride + j];
                 }
-                else
-                {
-                    sum = 0f;
-                    int start = down.Start[y];
-                    for (int j = 0; j < down.Count[y]; ++j)
-                    {
-                        sum += down.Weights[y * down.Stride + j] * horizontal[(start + j) * outWidth * channels + i];
-                    }
-                }
-                result[y * outWidth * channels + i] = (byte)Math.Clamp(MathF.Round(sum, MidpointRounding.ToEven), 0f, 255f);
+                result[y * width * channels + i] = (byte)Math.Clamp(sum >> precision, 0, 255);
             }
         }
         return result;

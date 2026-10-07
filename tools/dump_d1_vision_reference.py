@@ -73,7 +73,7 @@ def run_case(model, engine, state, questions, image):
     suffixes = [prompt.suffix_text(tok, q, engine.lead, engine.option_style) for q in qs]
 
     tensors = {}
-    tower = model.model.vision_tower.vision_model
+    tower = getattr(model.model.vision_tower, "vision_model", model.model.vision_tower)
     tower_store = {}
     handles = []
 
