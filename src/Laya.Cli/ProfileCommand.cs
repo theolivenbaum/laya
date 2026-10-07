@@ -16,7 +16,7 @@ namespace Laya.Cli;
 /// </summary>
 internal static class ProfileCommand
 {
-    public static int Run(CommandLine options, Func<CommandLine, Agent> openAgent,
+    public static int Run(CommandLine options, Func<CommandLine, IDecisionEngine> openAgent,
         Func<CommandLine, object?> readState, Func<CommandLine, QuestionSet> readQuestions)
     {
         int threads = int.Parse(options.Value("threads") ?? "1", CultureInfo.InvariantCulture);
@@ -55,7 +55,7 @@ internal static class ProfileCommand
         Console.WriteLine(string.Format(CultureInfo.InvariantCulture,
             "Managed heap {0}, weights {1}, working set {2}",
             Bytes(GC.GetTotalMemory(forceFullCollection: false)),
-            Bytes(agent.Model.WeightBytes),
+            Bytes(agent switch { Agent a => a.Model.WeightBytes, D1.D1Agent d => d.Model.WeightBytes, _ => 0 }),
             Bytes(Environment.WorkingSet)));
 
         if (options.Has("no-trace")) return 0;

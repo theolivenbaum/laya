@@ -42,7 +42,7 @@ public class AgentTests(ITestOutputHelper output)
         var result = agent.SystemOne("I was charged twice", new QuestionSet().Add("only", Question.Choice("Which team?", "billing")));
         Assert.Equal("billing", result["only"].Choice);
         Assert.Equal(1d, result["only"].ProbabilityOf("billing"));
-        Assert.InRange(result["only"].Action.ActProbability, 0d, 1d);
+        Assert.InRange(result["only"].Action!.ActProbability, 0d, 1d);
     }
 
     [ModelFact]
@@ -85,7 +85,7 @@ public class AgentTests(ITestOutputHelper output)
         foreach (var (id, answer) in result.Answers)
         {
             Assert.InRange(answer.Confidence, 0d, 1d);
-            Assert.InRange(answer.Action.ActProbability, 0d, 1d);
+            Assert.InRange(answer.Action!.ActProbability, 0d, 1d);
             if (answer.Probabilities is not null)
             {
                 Assert.Equal(1d, answer.Probabilities.Sum(p => p.Value), 2);
@@ -169,7 +169,7 @@ public class AgentTests(ITestOutputHelper output)
             Assert.Equal(alone.Confidence, together.Confidence, 4);
             Assert.Equal(alone.Noul ?? 0, together.Noul ?? 0, 4);
             Assert.Equal(alone.Score ?? 0, together.Score ?? 0, 3);
-            Assert.Equal(alone.Action.ActProbability, together.Action.ActProbability, 4);
+            Assert.Equal(alone.Action!.ActProbability, together.Action!.ActProbability, 4);
         }
     }
 

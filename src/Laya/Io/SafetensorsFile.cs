@@ -106,6 +106,35 @@ public sealed class SafetensorsFile : IDisposable
         return result;
     }
 
+    /// <summary>
+    /// Reads a bf16 tensor as its raw 16-bit patterns, without widening, for weights that are kept
+    /// in bf16 and widened by the kernels (<see cref="Laya.Numerics.BFloat16Matrix"/>).
+    /// </summary>
+    public unsafe ushort[] ReadBFloat16Bits(string name)
+    {
+        var entry = Entry(name);
+        if (entry.DType != "BF16")
+        {
+            throw new NotSupportedException($"{name}: expected a BF16 tensor, found {entry.DType}.");
+        }
+        long count = entry.ElementCount;
+        if (count > Array.MaxLength) throw new NotSupportedException($"{name}: tensor has {count} elements.");
+        Expect(entry.End - entry.Start, count * 2, entry);
+
+        var result = GC.AllocateUninitializedArray<ushort>((int)count);
+        byte* basePointer = null;
+        _view.SafeMemoryMappedViewHandle.AcquirePointer(ref basePointer);
+        try
+        {
+            new ReadOnlySpan<ushort>(basePointer + _dataStart + entry.Start, (int)count).CopyTo(result);
+        }
+        finally
+        {
+            _view.SafeMemoryMappedViewHandle.ReleasePointer();
+        }
+        return result;
+    }
+
     /// <summary>Reads a tensor into an existing fp32 buffer.</summary>
     public unsafe void Read(SafetensorsEntry entry, Span<float> destination)
     {

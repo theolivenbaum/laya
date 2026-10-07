@@ -45,6 +45,17 @@ CASES = [
     "trailing spaces   ",
     "\r\n\r\n",
     "",
+    "<|startoftext|><|im_start|>user\nhello<|im_end|>\n<|im_start|>assistant\n",
+    "Reply with the option code only.",
+    " A", " B", "A", "00", "#12", "yes", " Yes", "NO",
+    "I'm sure you'll see they've done it, WE'LL SEE",
+    "line one\n\n\nline two\r\n\tindented",
+    "1234567 digits 12 345",
+    "Wir haben die Rechnung doppelt bezahlt. Bitte um Rückerstattung.",
+    "Мы оплатили счёт дважды",
+    "請退還重複扣款",
+    "𝐁𝐨𝐥𝐝 𠀀 ext-B",
+    "{\n  \"a\": [\n    1,\n    2\n  ]\n}\n\n\nQUESTION:\n",
 ]
 
 ALPHABET = "abcdefgABCDEFG 0123456789 ,.!?;:'\"()[]{}\n\téü中\U0001F600_-"
@@ -58,7 +69,9 @@ def main():
     parser.add_argument("--seed", type=int, default=0)
     args = parser.parse_args()
 
-    tokenizer = AutoTokenizer.from_pretrained(os.path.join(args.model_dir, "tokenizer"))
+    # laya checkpoints keep the tokenizer in a subfolder; d1 / LFM2 keeps it at the root.
+    sub = os.path.join(args.model_dir, "tokenizer")
+    tokenizer = AutoTokenizer.from_pretrained(sub if os.path.isdir(sub) else args.model_dir)
 
     cases = list(CASES)
     random.seed(args.seed)

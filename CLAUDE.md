@@ -16,6 +16,7 @@ is right unless there is a written note here saying otherwise.
 ```
 .reference/            original Python package, tests, notebook, packaging (read-only spec)
 src/Laya/              the port: numerics, tokenizer, ModernBERT, decision head, runtime
+src/Laya/D1/           LiquidAI's d1 decision model (LFM2.5-VL-3B): prompt, readout, images
 src/Laya.Catalyst/     optional statistical language identifier for the router (Catalyst)
 src/Laya.Training/     fine-tuning: backward pass, RLCD objective, AdamW, calibration, dataset
 src/Laya.Cli/          `laya` command line tool (predict, route, download, dump, bench, train, evaluate)
@@ -142,6 +143,80 @@ samples one question position, so only `choice` was ever fitted — a seeded ran
 same size is used), stale
   `temperature_by_options` buckets surviving the fit (they are refitted and replaced), and fitted
   temperatures outside the clamp range (they are clamped to what inference applies).
+
+## d1 (LiquidAI/d1-3B)
+
+A second engine beside the laya checkpoints: `D1Agent : IDecisionEngine`. Ground truth is the
+checkpoint's own Python (`modeling_d1.py`, `runner.py`, `hybrid.py`, `lfm2_vl.py`, `prompt.py`,
+`api.py`, downloaded with the weights) running on transformers 5.x; `tools/dump_d1_reference.py`
+(text) and `tools/dump_d1_vision_reference.py` (pictures) dump it, `D1ParityTests` compares every
+layer. Weights come from Hugging Face (LFM Open License v1.0), not the model host.
+
+What has to be reproduced exactly:
+
+1. **Prompt** (`D1Prompt`, from `prompt.py`): `<|startoftext|><|im_start|>user\n{images}{state}\n\n\nQUESTION:\n{question}<|im_end|>\n<|im_start|>assistant\n`.
+   A string state is itself; anything else is `json.dumps(state, ensure_ascii=False, indent=2)`.
+   Choice options get single-token codes (the labels if all single letters, else `A`..`Z`, else
+   `00`..), with a fallback pool when a code is not one token. Readout: each option scores the max
+   logit over its forms (`yes/Yes/YES`, the digit, the code and ` code`), softmax over options.
+   The log-normalizer cancels, so only the option tokens' logits are computed.
+2. **One question** is the whole prompt encoded at once, one causal chain. **Several** are the
+   prefix encoded once (the trunk) and each suffix encoded on its own (branches) — not the joint
+   encoding split at the common prefix. `Lfm2Tree` is `hybrid.Tree`.
+3. **LFM2 layer**: `h = x + op(rms(x)); h = h + w2(silu(w1 rms(h)) * w3 rms(h))`. Conv: `in_proj`
+   emits `[B | C | x]`, `y = out(C * conv(B * x))`, depthwise, 3 causal taps that follow the tree's
+   parent chain (a branch's first tokens read the trunk's last). Attention: GQA 32/8, per-head q/k
+   RMSNorm *before* RoPE, half-split RoPE over the whole 64-dim head, theta 1e6, angles computed in
+   fp32 as torch does. Final norm is `embedding_norm`. LM head tied to `embed_tokens`.
+4. **Vision**: `cap_pixels` (Pillow bicubic to <= 1 MP) → `Lfm2VlImageProcessor` (smart resize to
+   multiples of 32 holding 64..256 tokens, or 512-px tiles 2..10 + thumbnail when "too large") →
+   torchvision bicubic antialias on uint8 → `(x - 127.5) / 127.5` → 16-px patches `[py, px, c]` →
+   SigLIP2 NaFlex (pos grid 16x16 resized *bilinear antialias* to the patch grid, 27 pre-LN layers,
+   tanh-GELU) → pixel unshuffle 2x2 (channels `[(dy*2+dx)*C + c]`) → Linear, GELU(erf), Linear →
+   scattered into the `<image>` slots in order. Placeholder text: `<|image_start|>` (+
+   `<|img_row_r_col_c|>` per tile, `<|img_thumbnail|>`) + `<image>` x tokens + `<|image_end|>`.
+
+Things that bit:
+
+- **A third of the conv `in_proj` weights are bf16 subnormals**, and some SwiGLU outputs are too.
+  Every x86 FMA touching one takes a microcode assist; neither PyTorch nor .NET sets FTZ/DAZ. The
+  reference as shipped spends ~80% of its time there (21 s for a 61-token decision on one core vs
+  4 s with `torch.set_flush_denormal(True)`). `BFloat16Matrix` flushes subnormal weights at load
+  and subnormal activations while packing; parity is unchanged to the printed digit.
+- **torchvision's uint8 bicubic is not float interpolation + rounding.** On CPU it is PyTorch's
+  native uint8 kernel: double taps quantized to int16 with the largest precision keeping the biggest
+  tap under 2^15, width pass then height pass, each rounded to bytes. Pillow is the same shape with
+  22-bit taps. Both are bit-exact in `Resampling`; a float version was off by up to 24 levels.
+- Picture parity has looser per-layer bounds than text, on purpose: the tower reaches ~1600 and its
+  fp32 round-off (~1e-4 relative) grows on the image rows to ~1e-3 of the residual stream.
+  `LanguageModelOverReferenceImageFeaturesMatchesPyTorch` feeds PyTorch's own features and holds the
+  text bound, so the language model is exact; log-probs and answers keep the tight bounds.
+- transformers 5's `Siglip2VisionModel` has no `.vision_model` (the checkpoint keys still do).
+- The full model in fp32 (12.5 GB) plus activations is over this container's 13 GB cgroup; the
+  vision dump runs the tower first with the language model in bf16, then swaps.
+
+### The bf16 GEMM, measured (4-core Xeon, AVX-512, one thread)
+
+`BFloat16Matrix` keeps weights in bf16 (5.0 GiB for the text stack instead of 10) in 12-column
+panels, packs activations into 16-row groups (an AVX-512 16x16 register transpose), and runs a
+32x12 register tile (2 activation vectors x 12 broadcast weights, 24 accumulators) over 256-step
+reduction blocks widened into L1/L2 scratch, accumulating into a tile-contiguous buffer that is
+register-transposed into the output. Results are bit-identical to one fp32 FMA chain per output.
+
+| measurement | GFLOP/s |
+|---|---|
+| FMA roof, 512-bit, registers only (`--fma-roof`) | 150-160 |
+| the 32x12 tile, both operands in L1 (`--tile 64`) | 145 |
+| the tile streaming one operand from L2 | 126-138 |
+| the whole product, 608 rows (`--bf16-gemm 608`) | ~100-105 |
+| the whole product, 61 rows | ~93 |
+| MKL fp32 (`tools/bench_gemm.py`), 608 / 61 rows | 126-137 / 75-85 |
+
+Tried and **rejected** (no gain within the VM's ±10% noise): the old 6x64 PackedMatrix layout with
+widening (75-88), software prefetch of the weight stream, row-tile-outermost order with the whole
+reduction widened (worse), reduction blocks 64-512 and column blocks 48-2048 (flat). A scattered
+`[column][row]` accumulator cost ~25%; the tile-contiguous layout fixed it. Measure with
+`--bf16-gemm`'s long runs: 40 ms runs on this VM vary by 20%.
 
 ## Target frameworks
 

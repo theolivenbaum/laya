@@ -121,3 +121,17 @@ against PyTorch is not reachable in fp32 on this hardware.
 - GPU execution is out of scope; this port is CPU/SIMD only.
 - Training lives in `Laya.Training`, a separate package, as the notebook lives outside the Python
   package. It runs fp32 on the CPU where the notebook ran fp16 autocast on two GPUs.
+
+## d1 (LiquidAI/d1-3B)
+- [x] `Lfm2Config`, `Lfm2LanguageModel`: gated short conv, GQA attention (q/k RMSNorm, RoPE), SwiGLU, tied head
+- [x] `Lfm2Tree`: trunk + branches, several questions read the state once (`hybrid.Tree`)
+- [x] `D1Prompt` / `D1Agent`: `prompt.py` and `api.py`, readout over option tokens only
+- [x] Tokenizer: regex `Split` pre-tokenizer; `PythonJson` indent
+- [x] `BFloat16Matrix`: bf16 weights, 32x12 AVX-512 tile, subnormal flush
+- [x] Vision: `D1ImageProcessor` (cap, smart resize, tiles, thumbnail), bit-exact torchvision/Pillow
+      bicubic, `Siglip2VisionModel`, pixel unshuffle + projector, placeholder expansion
+- [x] Parity: text (chain, trees, JSON, multilingual) and pictures (small, tiled, over 1 MP)
+- [x] CLI: `--model d1`, `--image`, `download --model d1`
+- [ ] `system_one_batch` (many single-question requests packed into one tree)
+- [ ] GEMM: ~100 GFLOP/s at 600 rows vs MKL's ~130 (see CLAUDE.md for what was tried)
+- [ ] JPEG input (PNG and PPM are read; decode anything else to RGB bytes)

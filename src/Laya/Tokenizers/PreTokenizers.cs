@@ -76,6 +76,49 @@ public sealed class MetaspacePreTokenizer(string replacement, string prependSche
     }
 }
 
+/// <summary>
+/// <c>Split</c> with a regex pattern: the text is cut at every match. With <c>Isolated</c> (the only
+/// behaviour LFM2's tokenizer uses) each match and each gap between matches becomes its own piece;
+/// <c>Removed</c> keeps only the gaps.
+///
+/// <para>The pattern is tokenizers' (Oniguruma) syntax, which .NET reads unchanged for the
+/// constructs these files use — <c>(?i:…)</c>, <c>\p{L}</c>, <c>\p{N}</c>, <c>\s</c> and lookahead.
+/// One difference is inherent: .NET matches UTF-16 code units, so a letter outside the Basic
+/// Multilingual Plane (a CJK Extension B ideograph, a mathematical alphanumeric) is not
+/// <c>\p{L}</c> here. The byte-level pieces it lands in still cover every byte, so nothing is
+/// lost — such text may only split differently.</para>
+/// </summary>
+public sealed class SplitPreTokenizer : IPreTokenizer
+{
+    private readonly Regex _pattern;
+    private readonly bool _removeMatches;
+
+    public SplitPreTokenizer(string pattern, bool isRegex, string behavior, bool invert)
+    {
+        if (invert) throw new NotSupportedException("tokenizer.json Split with invert: true is not implemented.");
+        _removeMatches = behavior switch
+        {
+            "Isolated" => false,
+            "Removed" => true,
+            _ => throw new NotSupportedException($"tokenizer.json Split behavior '{behavior}' is not implemented."),
+        };
+        _pattern = new Regex(isRegex ? pattern : Regex.Escape(pattern), RegexOptions.Compiled | RegexOptions.CultureInvariant);
+    }
+
+    public void Split(string text, List<string> destination)
+    {
+        int previous = 0;
+        foreach (var match in _pattern.EnumerateMatches(text))
+        {
+            if (match.Length == 0) continue;
+            if (match.Index > previous) destination.Add(text[previous..match.Index]);
+            if (!_removeMatches) destination.Add(text.Substring(match.Index, match.Length));
+            previous = match.Index + match.Length;
+        }
+        if (previous < text.Length) destination.Add(text[previous..]);
+    }
+}
+
 public sealed class WhitespaceSplitPreTokenizer : IPreTokenizer
 {
     public void Split(string text, List<string> destination)
@@ -120,9 +163,20 @@ internal static class PreTokenizerFactory
                 element.TryGetProperty("prepend_scheme", out var ps) ? ps.GetString() ?? "always" : "always",
                 !element.TryGetProperty("split", out var sp) || sp.GetBoolean()),
             "WhitespaceSplit" => new WhitespaceSplitPreTokenizer(),
+            "Split" => CreateSplit(element),
             "Sequence" => CreateSequence(element),
             _ => throw new NotSupportedException($"tokenizer.json pre_tokenizer '{type}' is not implemented."),
         };
+    }
+
+    private static SplitPreTokenizer CreateSplit(JsonElement element)
+    {
+        var pattern = element.GetProperty("pattern");
+        bool isRegex = pattern.TryGetProperty("Regex", out var regex);
+        string text = isRegex ? regex.GetString()! : pattern.GetProperty("String").GetString()!;
+        return new SplitPreTokenizer(text, isRegex,
+            element.TryGetProperty("behavior", out var behavior) ? behavior.GetString() ?? "Isolated" : "Isolated",
+            element.TryGetProperty("invert", out var invert) && invert.GetBoolean());
     }
 
     private static IPreTokenizer CreateSequence(JsonElement element)

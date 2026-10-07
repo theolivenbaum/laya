@@ -225,6 +225,70 @@ var result = agent.SystemOne(state, questions, quarter);   // also on Predict, R
 
 ---
 
+## d1: LiquidAI's decision model
+
+[`LiquidAI/d1-3B`](https://huggingface.co/LiquidAI/d1-3B) is a 3.1B-parameter multimodal decision
+model built on LFM2.5-VL-3B: the same typed questions (`choice`, `score`, `noul`), answered in one
+causal forward pass with zero output tokens, over text, JSON and pictures. `D1Agent` runs it
+in-process, implements `IDecisionEngine`, and takes the same `QuestionSet`s as `Agent`.
+
+```csharp
+using Laya.D1;
+
+using var d1 = D1Agent.Load();          // LiquidAI/d1-3B from Hugging Face (~6.3 GB), cached
+var result = d1.SystemOne("I was charged twice this month, please refund one of them.", Presets.Triage());
+
+// Pictures are part of the state; with no text, the pictures are the whole state.
+var photo = RgbImage.Load("cats.png");  // PPM or PNG; decode anything else to RGB bytes yourself
+var cats = d1.SystemOne(null, new QuestionSet().Add("count",
+    Question.Choice("How many cats are there?", ("one", "One"), ("two", "Two"), ("more", "Three or more"))), [photo]);
+```
+
+```bash
+laya download --model d1
+laya predict --model d1 --preset triage --text "I was charged twice"
+laya predict --model d1 --image photo.png --question 'cat=noul:Is there a cat?'
+```
+
+How it differs from a laya checkpoint:
+
+* **There is no decision head.** The state and the question are rendered as a chat prompt (the
+  checkpoint's own `prompt.py`, ported verbatim in `D1Prompt`: options become single-token codes
+  `A`, `B`, …), and the answer is a softmax over those codes' LM-head logits at the last position.
+  Only the option tokens' logits are computed — the log-normalizer cancels — so the 128k-entry
+  LM head costs a dozen dot products.
+* **Several questions read the state once.** The state is the trunk of a tree and every question a
+  branch (`Lfm2Tree`, the reference's `hybrid.Tree`): token-wise work runs over all branches in one
+  product, a branch's convolution continues from the trunk's last tokens, and its attention sees
+  the trunk and itself, never a sibling.
+* **The answers are d1's:** `noul` is P(yes), `confidence` is the top probability (for a `noul`,
+  max(p, 1 − p)); values are not rounded and there is no `action` estimate.
+* **License.** The weights are LiquidAI's, under the LFM Open License v1.0, and are downloaded
+  from Hugging Face rather than mirrored.
+
+The backbone is a 30-layer LFM2 hybrid (22 gated short-convolution layers, 8 GQA attention layers,
+SwiGLU MLPs, tied LM head) kept in bf16 — 5.0 GiB resident, half of fp32, and bit-identical inputs
+to the fp32 arithmetic PyTorch does on CPU. Pictures go through the SigLIP2 NaFlex tower (27
+layers), a 2 × 2 pixel unshuffle and a two-layer projector; tiling, thumbnails, and both the
+torchvision and Pillow bicubic resizes are reproduced bit for bit.
+
+Single-threaded on the same 4-core Xeon, warm, against the checkpoint's own PyTorch code in fp32:
+
+| | 61 tokens, 1 question | 116 tokens, 3 questions | 608 tokens, 3 questions |
+|---|---|---|---|
+| this library | **3.2–3.5 s** | **6.4 s** | 30.4 s |
+| PyTorch 2.14 (MKL), as shipped | 20.9 s | 39.4 s | 193 s |
+| PyTorch 2.14 with `set_flush_denormal(True)` | 4.1 s | 6.6 s | **26.4 s** |
+
+About a third of d1's short-convolution input weights are bf16 *subnormals*. Every x86 FMA that
+touches one takes a microcode assist, and neither PyTorch nor .NET sets flush-to-zero, so the
+reference spends most of its time there. `BFloat16Matrix` flushes subnormal weights and
+activations to zero — numerically invisible (a 1e-39 term in an fp32 sum of order one), and the
+parity tests are unchanged by it. Against PyTorch with flush-to-zero turned on, short decisions
+are faster here; on long states MKL's GEMM (~130 GFLOP/s at 600 rows vs ~100 here) is ahead.
+
+---
+
 ## Routing between languages
 
 `Router` detects the script first and the language second, then sends each request to a checkpoint
@@ -472,6 +536,14 @@ Training is held to the same standard: every parameter gradient of a small rando
 checkpoint's gradients to ~1e-5, the RLCD loss and its logit gradient match the notebook's code on
 the same random draws, AdamW and the cosine schedule match `torch.optim`, and training sequences
 match the notebook's `build_training_item` token for token.
+
+d1 is checked the same way against the checkpoint's own PyTorch code: the rendered prompts and
+token ids exactly, every one of the 30 LFM2 layers (and the conv and attention internals of the
+first of each), the full-vocabulary log-softmax at every answer slot (within 2.5e-5) and the
+answers, on a lone question and on question trees. For pictures: the resized, normalized patches
+(to 1.2e-7 — both bicubic resizers are bit-exact), all 27 SigLIP2 layers, the projected features
+and the language model over them. The tokenizer matches `transformers` on 347 strings, and the
+bf16 GEMM is bit-identical to a plain fp32 FMA chain.
 
 Golden dumps live in [`tests/Laya.Tests/Fixtures/`](tests/Laya.Tests/Fixtures), so the parity
 suite runs without Python:

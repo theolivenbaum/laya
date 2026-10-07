@@ -89,7 +89,10 @@ internal static class Program
           evaluate      Score a checkpoint on typed-decisions cases (accuracy, Brier, ECE, ...)
 
         COMMON OPTIONS
-          --model <name>        english | multilingual | typed-decisions   (default: english)
+          --model <name>        english | multilingual | typed-decisions | d1   (default: english)
+                                d1 is LiquidAI/d1-3B, fetched from Hugging Face (~6.3 GB)
+          --image <file>        d1 only: a PPM or PNG picture in the state (repeatable); with
+                                no --text the pictures are the whole state
           --source <where>      host | hub   (default: host — https://models.curiosity.ai/laya)
           --standalone          Take --model from its own repo rather than the bundle repo
           --repo <id>           A specific Hugging Face repo id, instead of --model
@@ -122,6 +125,10 @@ internal static class Program
           laya download --repo convaiinnovations/laya-typed-decisions
           laya predict --model-dir ./artifacts/models/english --preset triage \
                        --text "I was charged twice and nobody answers"
+          laya download --model d1
+          laya predict --model d1 --question 'team=choice:Which team?|billing,technical,fraud' \
+                       --text "I was charged twice"
+          laya predict --model d1 --image photo.png --question 'cat=noul:Is there a cat?'
           laya route --text "Mein Konto wurde zweimal belastet"
           laya route --lid catalyst --text "Saya ditagih dua kali untuk langganan saya"
           laya profile --model-dir ./artifacts/models/english --preset triage \
@@ -144,11 +151,12 @@ internal static class Program
     private static int Predict(CommandLine options)
     {
         using var agent = OpenAgent(options);
-        object? state = ReadState(options);
+        object? state = ReadStateOrImagesOnly(options);
         var questions = ReadQuestions(options);
+        var images = ReadImages(options);
 
         var stopwatch = Stopwatch.StartNew();
-        var result = agent.SystemOne(state, questions);
+        var result = Run(agent, state, questions, recorder: null, images);
         stopwatch.Stop();
 
         Console.WriteLine(JsonSerializer.Serialize(ToPayload(result), Json));
@@ -225,11 +233,11 @@ internal static class Program
     private static int DumpStates(CommandLine options)
     {
         using var agent = OpenAgent(options);
-        object? state = ReadState(options);
+        object? state = ReadStateOrImagesOnly(options);
         var questions = ReadQuestions(options);
 
         var recorder = new StateRecorder();
-        var result = agent.SystemOne(state, questions, recorder);
+        var result = Run(agent, state, questions, recorder, ReadImages(options));
 
         string output = options.Value("out") ?? "artifacts/dumps/dotnet.json";
         string answersJson = JsonSerializer.Serialize(
@@ -246,16 +254,17 @@ internal static class Program
     private static int Bench(CommandLine options)
     {
         using var agent = OpenAgent(options);
-        object? state = ReadState(options);
+        object? state = ReadStateOrImagesOnly(options);
         var questions = ReadQuestions(options);
+        var images = ReadImages(options);
         int iterations = int.Parse(options.Value("iterations") ?? "3", CultureInfo.InvariantCulture);
 
-        agent.SystemOne(state, questions);   // warm up the JIT and the page cache
+        Run(agent, state, questions, null, images);   // warm up the JIT and the page cache
         var timings = new List<double>();
         for (int i = 0; i < iterations; ++i)
         {
             var stopwatch = Stopwatch.StartNew();
-            var result = agent.SystemOne(state, questions);
+            var result = Run(agent, state, questions, null, images);
             stopwatch.Stop();
             timings.Add(stopwatch.Elapsed.TotalMilliseconds);
             Console.WriteLine(string.Format(CultureInfo.InvariantCulture,
@@ -288,7 +297,40 @@ internal static class Program
         return catalogue[name];
     }
 
-    private static Agent OpenAgent(CommandLine options) => Agent.FromDirectory(ModelDirectory(options));
+    /// <summary>A laya checkpoint, or d1 when the directory holds an LFM2-VL one.</summary>
+    private static IDecisionEngine OpenAgent(CommandLine options)
+    {
+        string directory = ModelDirectory(options);
+        return D1.D1Agent.IsCheckpoint(directory) ? D1.D1Agent.FromDirectory(directory) : Agent.FromDirectory(directory);
+    }
+
+    private static DecisionResult Run(IDecisionEngine engine, object? state, QuestionSet questions, IStateRecorder? recorder,
+        IReadOnlyList<D1.RgbImage>? images = null)
+    {
+        if (images is { Count: > 0 })
+        {
+            return engine is D1.D1Agent vision
+                ? vision.SystemOne(state, questions, images, recorder)
+                : throw new ArgumentException("--image needs a d1 checkpoint; laya checkpoints read text only.");
+        }
+        return engine switch
+        {
+            Agent agent => agent.SystemOne(state, questions, recorder),
+            D1.D1Agent d1 => d1.SystemOne(state, questions, recorder),
+            _ => engine.SystemOne(state, questions),
+        };
+    }
+
+    /// <summary><c>--image path</c>, repeatable: PPM or PNG files, read as RGB.</summary>
+    private static IReadOnlyList<D1.RgbImage> ReadImages(CommandLine options)
+        => [.. options.Values("image").Select(D1.RgbImage.Load)];
+
+    /// <summary>The state; with pictures it may be omitted, and the pictures are the whole state.</summary>
+    private static object? ReadStateOrImagesOnly(CommandLine options)
+        => options.Has("image") && options.Value("text") is null && options.Value("state-json") is null
+            && options.Value("state-file") is null
+            ? null
+            : ReadState(options);
 
     private static string ModelDirectory(CommandLine options)
         => options.Value("model-dir") is string directory ? directory : DownloadCheckpoint(options);
@@ -302,6 +344,19 @@ internal static class Program
     private static string DownloadCheckpoint(CommandLine options)
     {
         var progress = new ConsoleProgress();
+        if (options.Value("model") is "d1" or "d1-3b" or "d1-3B")
+        {
+            // d1 is published by LiquidAI on Hugging Face under its own license (LFM Open License
+            // v1.0), so it is fetched from there rather than mirrored on the model host.
+            string repo = options.Value("repo") ?? D1.D1Agent.DefaultRepository;
+            Console.WriteLine($"Downloading {repo} …");
+            using var hub = new HuggingFaceDownloader(options.Value("token"));
+            string snapshot = hub.SnapshotAsync(repo, options.Value("cache"),
+                include: path => D1.D1Agent.CheckpointFiles.Contains(path, StringComparer.Ordinal), progress: progress)
+                .GetAwaiter().GetResult();
+            progress.Finish();
+            return snapshot;
+        }
         if (!UsesHub(options))
         {
             var checkpoint = RemoteCheckpoint.FromName(Router.Normalise(options.Value("model") ?? "english"));
@@ -375,7 +430,7 @@ internal static class Program
         probabilities = answer.Probabilities?.ToDictionary(p => p.Key, p => p.Value),
         legend = answer.Legend?.ToDictionary(l => l.Key, l => l.Value),
         confidence = answer.Confidence,
-        action = new { act_probability = answer.Action.ActProbability },
+        action = answer.Action is null ? null : new { act_probability = answer.Action.ActProbability },
     };
 
     private static object ToPayload(DecisionResult result) => new
