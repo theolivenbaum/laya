@@ -275,6 +275,15 @@ public sealed class D1Agent : IDecisionEngine
     }
 
     /// <summary>
+    /// The language model over token ids laid out as <paramref name="tree"/>, with image features
+    /// already in hand (<c>[tokens, hidden]</c>, in <c>&lt;image&gt;</c>-slot order) — for callers
+    /// that cache a picture's features, or bring their own. Returns the final-normed hidden states.
+    /// </summary>
+    public float[] Forward(IReadOnlyList<int> ids, Lfm2Tree tree, float[]? imageFeatures, IStateRecorder? recorder = null,
+        ParallelOptions? parallel = null)
+        => Run([.. ids], tree, imageFeatures, recorder, parallel);
+
+    /// <summary>
     /// Embeds <paramref name="ids"/>, scatters the image features into the <c>&lt;image&gt;</c> rows
     /// in order (<c>masked_scatter</c>), and runs the stack.
     /// </summary>

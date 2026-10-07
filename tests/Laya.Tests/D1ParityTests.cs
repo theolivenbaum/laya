@@ -33,6 +33,17 @@ public class D1ParityTests(ITestOutputHelper output, D1ParityTests.Loaded loaded
     /// </summary>
     private const double RelativeTolerance = 1e-4;
 
+    /// <summary>
+    /// Bounds for the picture cases. The SigLIP2 tower carries values up to ~1600 by its last layer,
+    /// and 27 layers of fp32 round-off leave ~1e-4 of that (5e-4 allows for it); the language model
+    /// then carries the projected features' ~2e-5 differences through 30 layers on the image rows,
+    /// to ~1e-3 of the residual stream. <see cref="LanguageModelOverReferenceImageFeaturesMatchesPyTorch"/>
+    /// shows that is amplified noise and not the language model: fed PyTorch's own features, the
+    /// image rows match to the text cases' 1e-4. The log-probabilities and answers keep their bounds.
+    /// </summary>
+    private const double VisionTowerTolerance = 5e-4;
+    private const double VisionLanguageModelTolerance = 2e-3;
+
     /// <summary>Bound on the log-probabilities at the answer slot, which feed the answer directly.</summary>
     private const double LogProbabilityTolerance = 2e-3;
 
@@ -67,6 +78,38 @@ public class D1ParityTests(ITestOutputHelper output, D1ParityTests.Loaded loaded
     /// <summary>Over a megapixel: Pillow's bicubic shrinks it first, then it is tiled.</summary>
     [D1ModelFact]
     public void CappedImageMatchesPyTorch() => Compare("capped", vision: true);
+
+    /// <summary>
+    /// The language model alone over PyTorch's own projected image features: with the tower's fp32
+    /// noise taken out, the image rows must match as tightly as text does. This separates "the LM is
+    /// right and the tower's noise grows through 30 layers" from a bug in the multimodal LM path.
+    /// </summary>
+    [D1ModelFact]
+    public void LanguageModelOverReferenceImageFeaturesMatchesPyTorch()
+    {
+        string dump = Path.Combine(TestModels.RepositoryRoot, "artifacts", "dumps", "d1-vision", "tiled.safetensors");
+        if (!File.Exists(dump)) return;   // needs the full dump; the fixture samples too little of the features
+        using var fixture = JsonDocument.Parse(File.ReadAllText(Path.Combine(TestModels.FixtureRoot, "torch-d1-vision.json")));
+        var meta = fixture.RootElement.GetProperty("cases").GetProperty("tiled");
+        using var reference = new SafetensorsFile(dump);
+        var features = new List<float>();
+        for (int t = 0; reference.Contains($"image0.tile{t}.projected"); ++t) features.AddRange(reference.ReadFloat32($"image0.tile{t}.projected"));
+
+        int[] ids = ExpectedIds(meta);
+        int trunk = meta.GetProperty("trunk").GetArrayLength();
+        var branches = meta.GetProperty("ids").EnumerateArray().Select(r => r.GetArrayLength()).ToArray();
+        var recorder = new StateRecorder();
+        Agent.Forward(ids, Models.Lfm2Tree.Branched(trunk, branches), [.. features], recorder);
+        var actual = recorder.States.ToDictionary(s => s.Name, s => s, StringComparer.Ordinal);
+
+        var failures = new List<string>();
+        foreach (var (name, entry) in reference.Entries)
+        {
+            if (!name.StartsWith("layers.", StringComparison.Ordinal) && name != "final_norm") continue;
+            Check(name, entry.Shape, reference.ReadFloat32(name), actual, failures, sampled: false);
+        }
+        Assert.Empty(failures);
+    }
 
     private D1Agent Agent => loaded.Agent!;
 
@@ -119,7 +162,7 @@ public class D1ParityTests(ITestOutputHelper output, D1ParityTests.Loaded loaded
             {
                 float[] expected = reference.ReadFloat32(tensorName);
                 compared++;
-                Check(tensorName, entry.Shape, expected, actual, failures, sampled: false);
+                Check(tensorName, entry.Shape, expected, actual, failures, sampled: false, vision);
             }
         }
         else
@@ -131,7 +174,7 @@ public class D1ParityTests(ITestOutputHelper output, D1ParityTests.Loaded loaded
                 int[] shape = [.. tensor.GetProperty("shape").EnumerateArray().Select(d => d.GetInt32())];
                 float[] expected = [.. tensor.GetProperty("values").EnumerateArray().Select(v => v.GetSingle())];
                 compared++;
-                Check(full[(name.Length + 1)..], shape, expected, actual, failures, sampled: true);
+                Check(full[(name.Length + 1)..], shape, expected, actual, failures, sampled: true, vision);
             }
         }
 
@@ -152,7 +195,7 @@ public class D1ParityTests(ITestOutputHelper output, D1ParityTests.Loaded loaded
     }
 
     private void Check(string name, int[] shape, float[] expected, Dictionary<string, RecordedState> actual,
-        List<string> failures, bool sampled)
+        List<string> failures, bool sampled, bool vision = false)
     {
         if (!actual.TryGetValue(name, out var got))
         {
@@ -176,9 +219,12 @@ public class D1ParityTests(ITestOutputHelper output, D1ParityTests.Loaded loaded
             scale = Math.Max(scale, Math.Abs(expected[i]));
         }
 
+        double relative = !vision ? RelativeTolerance
+            : name.StartsWith("image", StringComparison.Ordinal) ? VisionTowerTolerance
+            : VisionLanguageModelTolerance;
         double bound = name.StartsWith("logz", StringComparison.Ordinal) || name.StartsWith("probabilities", StringComparison.Ordinal)
             ? LogProbabilityTolerance
-            : RelativeTolerance * scale;
+            : relative * scale;
         string line = string.Format(CultureInfo.InvariantCulture, "{0,-28} max|Δ| = {1:E2}  (scale {2:F2}, bound {3:E1})",
             name, maxAbsolute, scale, bound);
         output.WriteLine(line);
