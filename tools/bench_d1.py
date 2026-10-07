@@ -31,8 +31,12 @@ def main():
     parser.add_argument("--threads", type=int, default=1)
     parser.add_argument("--iterations", type=int, default=5)
     parser.add_argument("--cases", nargs="*", default=None)
+    parser.add_argument("--flush-denormal", action="store_true",
+                        help="set flush-to-zero first; the reference does not, and d1's conv weights are a third subnormal")
     args = parser.parse_args()
     torch.set_num_threads(args.threads)
+    if args.flush_denormal:
+        torch.set_flush_denormal(True)
 
     from transformers import AutoModel
 
