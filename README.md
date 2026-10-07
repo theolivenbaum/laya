@@ -537,6 +537,14 @@ checkpoint's gradients to ~1e-5, the RLCD loss and its logit gradient match the 
 the same random draws, AdamW and the cosine schedule match `torch.optim`, and training sequences
 match the notebook's `build_training_item` token for token.
 
+d1 is checked the same way against the checkpoint's own PyTorch code: the rendered prompts and
+token ids exactly, every one of the 30 LFM2 layers (and the conv and attention internals of the
+first of each), the full-vocabulary log-softmax at every answer slot (within 2.5e-5) and the
+answers, on a lone question and on question trees. For pictures: the resized, normalized patches
+(to 1.2e-7 — both bicubic resizers are bit-exact), all 27 SigLIP2 layers, the projected features
+and the language model over them. The tokenizer matches `transformers` on 347 strings, and the
+bf16 GEMM is bit-identical to a plain fp32 FMA chain.
+
 Golden dumps live in [`tests/Laya.Tests/Fixtures/`](tests/Laya.Tests/Fixtures), so the parity
 suite runs without Python:
 

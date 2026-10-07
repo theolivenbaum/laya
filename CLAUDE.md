@@ -187,6 +187,10 @@ Things that bit:
   native uint8 kernel: double taps quantized to int16 with the largest precision keeping the biggest
   tap under 2^15, width pass then height pass, each rounded to bytes. Pillow is the same shape with
   22-bit taps. Both are bit-exact in `Resampling`; a float version was off by up to 24 levels.
+- Picture parity has looser per-layer bounds than text, on purpose: the tower reaches ~1600 and its
+  fp32 round-off (~1e-4 relative) grows on the image rows to ~1e-3 of the residual stream.
+  `LanguageModelOverReferenceImageFeaturesMatchesPyTorch` feeds PyTorch's own features and holds the
+  text bound, so the language model is exact; log-probs and answers keep the tight bounds.
 - transformers 5's `Siglip2VisionModel` has no `.vision_model` (the checkpoint keys still do).
 - The full model in fp32 (12.5 GB) plus activations is over this container's 13 GB cgroup; the
   vision dump runs the tower first with the language model in bf16, then swaps.

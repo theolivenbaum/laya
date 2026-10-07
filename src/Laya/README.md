@@ -44,6 +44,18 @@ Downloads resume where they stopped, and two processes starting at once share on
 `LAYA_MODEL_BASE_URL` points them at a mirror with the same layout. `Agent.Load()` fetches a
 checkpoint from the Hugging Face hub instead, and `Agent.FromDirectory(path)` loads one from disk.
 
+## d1
+
+`Laya.D1.D1Agent` runs LiquidAI's [d1-3B](https://huggingface.co/LiquidAI/d1-3B) decision model
+(LFM2.5-VL-3B, 3.1B parameters, LFM Open License v1.0) behind the same `IDecisionEngine`
+interface, on text, JSON and pictures:
+
+```csharp
+using var d1 = Laya.D1.D1Agent.Load();   // LiquidAI/d1-3B from Hugging Face, ~6.3 GB, cached
+var result = d1.SystemOne("I was charged twice", Presets.Triage());
+var seen = d1.SystemOne(null, questions, [Laya.D1.RgbImage.Load("photo.png")]);
+```
+
 ## Links
 
 * Source, docs and issues: <https://github.com/theolivenbaum/laya>
