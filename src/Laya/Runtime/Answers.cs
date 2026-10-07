@@ -40,8 +40,13 @@ public sealed record Answer
     [JsonPropertyName("confidence")]
     public required double Confidence { get; init; }
 
+    /// <summary>
+    /// The action head's estimate. Laya checkpoints always have one; a model without an action head
+    /// (d1) leaves it null and the payload has no <c>action</c> key.
+    /// </summary>
     [JsonPropertyName("action")]
-    public required ActionEstimate Action { get; init; }
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public ActionEstimate? Action { get; init; }
 
     /// <summary>Probability of a named option, or 0 when the question has no such option.</summary>
     public double ProbabilityOf(string option)

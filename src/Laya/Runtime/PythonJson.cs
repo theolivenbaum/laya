@@ -23,7 +23,37 @@ public static class PythonJson
         return builder.ToString();
     }
 
-    private static void Write(StringBuilder builder, object? value, bool ensureAscii, int depth)
+    /// <summary>
+    /// <c>json.dumps(value, ensure_ascii=…, indent=<paramref name="indent"/>)</c>: every member on its
+    /// own line, nested <paramref name="indent"/> spaces deeper, <c>","</c> with no trailing space
+    /// between members, and empty containers written as <c>{}</c> / <c>[]</c>.
+    /// </summary>
+    public static string Dumps(object? value, bool ensureAscii, int indent)
+    {
+        var builder = new StringBuilder();
+        Write(builder, value, ensureAscii, depth: 0, indent);
+        return builder.ToString();
+    }
+
+    private static void Open(StringBuilder builder, char bracket, int? indent, int depth)
+    {
+        builder.Append(bracket);
+        if (indent is int width) builder.Append('\n').Append(' ', width * (depth + 1));
+    }
+
+    private static void Separate(StringBuilder builder, int? indent, int depth)
+    {
+        if (indent is int width) builder.Append(",\n").Append(' ', width * (depth + 1));
+        else builder.Append(", ");
+    }
+
+    private static void Close(StringBuilder builder, char bracket, int? indent, int depth)
+    {
+        if (indent is int width) builder.Append('\n').Append(' ', width * depth);
+        builder.Append(bracket);
+    }
+
+    private static void Write(StringBuilder builder, object? value, bool ensureAscii, int depth, int? indent = null)
     {
         if (depth > 32)
         {
@@ -49,53 +79,70 @@ public static class PythonJson
                 builder.Append(Convert.ToString(value, CultureInfo.InvariantCulture));
                 return;
             case JsonElement element:
-                WriteJsonElement(builder, element, ensureAscii, depth);
+                WriteJsonElement(builder, element, ensureAscii, depth, indent);
                 return;
         }
 
         if (value is IDictionary dictionary)
         {
-            builder.Append('{');
+            if (dictionary.Count == 0)
+            {
+                builder.Append("{}");
+                return;
+            }
+            Open(builder, '{', indent, depth);
             bool first = true;
             foreach (DictionaryEntry entry in dictionary)
             {
-                if (!first) builder.Append(", ");
+                if (!first) Separate(builder, indent, depth);
                 first = false;
                 WriteString(builder, entry.Key?.ToString() ?? string.Empty, ensureAscii);
                 builder.Append(": ");
-                Write(builder, entry.Value, ensureAscii, depth + 1);
+                Write(builder, entry.Value, ensureAscii, depth + 1, indent);
             }
-            builder.Append('}');
+            Close(builder, '}', indent, depth);
             return;
         }
 
         if (value is IEnumerable<KeyValuePair<string, object?>> pairs)
         {
-            builder.Append('{');
-            bool first = true;
-            foreach (var pair in pairs)
+            var members = pairs.ToList();
+            if (members.Count == 0)
             {
-                if (!first) builder.Append(", ");
+                builder.Append("{}");
+                return;
+            }
+            Open(builder, '{', indent, depth);
+            bool first = true;
+            foreach (var pair in members)
+            {
+                if (!first) Separate(builder, indent, depth);
                 first = false;
                 WriteString(builder, pair.Key, ensureAscii);
                 builder.Append(": ");
-                Write(builder, pair.Value, ensureAscii, depth + 1);
+                Write(builder, pair.Value, ensureAscii, depth + 1, indent);
             }
-            builder.Append('}');
+            Close(builder, '}', indent, depth);
             return;
         }
 
         if (value is IEnumerable sequence)
         {
-            builder.Append('[');
-            bool first = true;
-            foreach (object? item in sequence)
+            var items = sequence.Cast<object?>().ToList();
+            if (items.Count == 0)
             {
-                if (!first) builder.Append(", ");
-                first = false;
-                Write(builder, item, ensureAscii, depth + 1);
+                builder.Append("[]");
+                return;
             }
-            builder.Append(']');
+            Open(builder, '[', indent, depth);
+            bool first = true;
+            foreach (object? item in items)
+            {
+                if (!first) Separate(builder, indent, depth);
+                first = false;
+                Write(builder, item, ensureAscii, depth + 1, indent);
+            }
+            Close(builder, ']', indent, depth);
             return;
         }
 
@@ -103,33 +150,44 @@ public static class PythonJson
         WriteString(builder, value.ToString() ?? string.Empty, ensureAscii);
     }
 
-    private static void WriteJsonElement(StringBuilder builder, JsonElement element, bool ensureAscii, int depth)
+    private static void WriteJsonElement(StringBuilder builder, JsonElement element, bool ensureAscii, int depth,
+        int? indent = null)
     {
         switch (element.ValueKind)
         {
             case JsonValueKind.Object:
-                builder.Append('{');
+                if (!element.EnumerateObject().Any())
+                {
+                    builder.Append("{}");
+                    return;
+                }
+                Open(builder, '{', indent, depth);
                 bool firstProperty = true;
                 foreach (var property in element.EnumerateObject())
                 {
-                    if (!firstProperty) builder.Append(", ");
+                    if (!firstProperty) Separate(builder, indent, depth);
                     firstProperty = false;
                     WriteString(builder, property.Name, ensureAscii);
                     builder.Append(": ");
-                    WriteJsonElement(builder, property.Value, ensureAscii, depth + 1);
+                    WriteJsonElement(builder, property.Value, ensureAscii, depth + 1, indent);
                 }
-                builder.Append('}');
+                Close(builder, '}', indent, depth);
                 return;
             case JsonValueKind.Array:
-                builder.Append('[');
+                if (element.GetArrayLength() == 0)
+                {
+                    builder.Append("[]");
+                    return;
+                }
+                Open(builder, '[', indent, depth);
                 bool firstItem = true;
                 foreach (var item in element.EnumerateArray())
                 {
-                    if (!firstItem) builder.Append(", ");
+                    if (!firstItem) Separate(builder, indent, depth);
                     firstItem = false;
-                    WriteJsonElement(builder, item, ensureAscii, depth + 1);
+                    WriteJsonElement(builder, item, ensureAscii, depth + 1, indent);
                 }
-                builder.Append(']');
+                Close(builder, ']', indent, depth);
                 return;
             case JsonValueKind.String:
                 WriteString(builder, element.GetString() ?? string.Empty, ensureAscii);

@@ -26,6 +26,13 @@ internal static class TestModels
         return Directory.Exists(built) ? built : Path.Combine(RepositoryRoot, "tests", "Laya.Tests", "Fixtures");
     }
 
+    /// <summary>Where the d1 checkpoint is looked for: <c>$LAYA_D1_MODEL</c> or <c>artifacts/models/d1-3B</c>.</summary>
+    public static string D1Directory { get; } =
+        Environment.GetEnvironmentVariable("LAYA_D1_MODEL") ?? Path.Combine(ModelRoot, "d1-3B");
+
+    public static bool D1Available
+        => File.Exists(Path.Combine(D1Directory, "model.safetensors")) && File.Exists(Path.Combine(D1Directory, "config.json"));
+
     public static bool Available(string checkpoint)
         => File.Exists(Path.Combine(CheckpointDirectory(checkpoint), "model.safetensors"))
         && File.Exists(Path.Combine(CheckpointDirectory(checkpoint), "rl_agent_config.json"));

@@ -375,7 +375,7 @@ internal static class Program
         probabilities = answer.Probabilities?.ToDictionary(p => p.Key, p => p.Value),
         legend = answer.Legend?.ToDictionary(l => l.Key, l => l.Value),
         confidence = answer.Confidence,
-        action = new { act_probability = answer.Action.ActProbability },
+        action = answer.Action is null ? null : new { act_probability = answer.Action.ActProbability },
     };
 
     private static object ToPayload(DecisionResult result) => new
