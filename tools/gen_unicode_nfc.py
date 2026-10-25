@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-"""Generate src/Laya/Tokenizers/UnicodeNfc.data, the tables behind Laya's managed NFC.
+"""Generate src/StructuredDecisions.Base/Tokenizers/UnicodeNfc.data, the tables behind Laya's managed NFC.
 
 Laya builds with InvariantGlobalization, where string.Normalize does not compose non-ASCII text, so NFC is
 implemented in managed code from these tables: every canonical decomposition, every non-zero canonical
 combining class, and the canonical compositions NFC actually performs (primary composites only: composition
 exclusions and singletons are left out by checking what unicodedata's own NFC produces).
 
-    python tools/gen_unicode_nfc.py > src/Laya/Tokenizers/UnicodeNfc.data
+    python tools/gen_unicode_nfc.py > src/StructuredDecisions.Base/Tokenizers/UnicodeNfc.data
 """
 import sys
 import unicodedata

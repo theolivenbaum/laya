@@ -10,7 +10,7 @@ contract fixtures.
 
     python tools/dump_mica_tokenizations.py --model-dir artifacts/models/mica \
         --contract /path/to/akivet/mica/tests/fixtures/contract_cases.json \
-        --out tests/Laya.Tests/Fixtures/tokenizer-mica.json
+        --out tests/StructuredDecisions.Tests/Fixtures/tokenizer-mica.json
 """
 import argparse
 import json

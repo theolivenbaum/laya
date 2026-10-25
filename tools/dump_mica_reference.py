@@ -14,7 +14,7 @@ Two modes:
           loaded, run over the hidden states, recorded and freed. It also records the label-token logits and
           the probabilities Mica would report. ``laya mica-dump`` produces the same tensors from C#.
 
-    python tools/dump_mica_reference.py tiny --out tests/Laya.Tests/Fixtures/qwen35-tiny
+    python tools/dump_mica_reference.py tiny --out tests/StructuredDecisions.Tests/Fixtures/qwen35-tiny
     python tools/dump_mica_reference.py checkpoint --model-dir artifacts/models/mica \
         --request request.json --out artifacts/dumps/mica-reference
 """

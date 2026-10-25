@@ -1,0 +1,15 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework Condition="'$(LayaEnableNet11)' != 'true'">net10.0</TargetFramework>
+    <TargetFrameworks Condition="'$(LayaEnableNet11)' == 'true'">$(LayaTargetFrameworks)</TargetFrameworks>
+    <RootNamespace>StructuredDecisions.Laya</RootNamespace>
+    <AssemblyName>StructuredDecisions.Laya</AssemblyName>
+    <IsPackable>true</IsPackable>
+    <PackageId>StructuredDecisions.Laya</PackageId>
+    <Description>Laya: fast, non-autoregressive System 1 decisions with calibrated probabilities — ModernBERT plus a typed decision head, one forward pass for every question.</Description>
+    <ServerGarbageCollection>true</ServerGarbageCollection>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="../StructuredDecisions.Base/StructuredDecisions.Base.csproj" />
+  </ItemGroup>
+</Project>

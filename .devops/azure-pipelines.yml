@@ -1,8 +1,10 @@
 variables:
-  projectLaya:        './src/Laya/Laya.csproj'
-  projectCatalyst:    './src/Laya.Catalyst/Laya.Catalyst.csproj'
-  projectTraining:    './src/Laya.Training/Laya.Training.csproj'
-  solution:           './Laya.slnx'
+  projectBase:        './src/StructuredDecisions.Base/StructuredDecisions.Base.csproj'
+  projectLaya:        './src/StructuredDecisions.Laya/StructuredDecisions.Laya.csproj'
+  projectCatalyst:    './src/StructuredDecisions.Laya.Catalyst/StructuredDecisions.Laya.Catalyst.csproj'
+  projectTraining:    './src/StructuredDecisions.Laya.Training/StructuredDecisions.Laya.Training.csproj'
+  projectMica:        './src/StructuredDecisions.Mica/StructuredDecisions.Mica.csproj'
+  solution:           './StructuredDecisions.slnx'
   buildConfiguration: 'Release'
   targetVersion: yy.M.$(build.buildId)
 
@@ -46,24 +48,38 @@ steps:
 # LayaEnableNet11=false pins the published target frameworks to what this repository has been
 # measured on, whatever SDKs the hosted image happens to carry.
 - task: DotNetCoreCLI@2
-  displayName: 'build Laya project'
+  displayName: 'build StructuredDecisions.Base project'
+  inputs:
+    command: 'build'
+    projects: '$(projectBase)'
+    arguments: '-c $(buildConfiguration) /p:Version=$(targetVersion) /p:LayaEnableNet11=false /p:GeneratePackageOnBuild=true'
+
+- task: DotNetCoreCLI@2
+  displayName: 'build StructuredDecisions.Laya project'
   inputs:
     command: 'build'
     projects: '$(projectLaya)'
     arguments: '-c $(buildConfiguration) /p:Version=$(targetVersion) /p:LayaEnableNet11=false /p:GeneratePackageOnBuild=true'
 
 - task: DotNetCoreCLI@2
-  displayName: 'build Laya.Catalyst project'
+  displayName: 'build StructuredDecisions.Laya.Catalyst project'
   inputs:
     command: 'build'
     projects: '$(projectCatalyst)'
     arguments: '-c $(buildConfiguration) /p:Version=$(targetVersion) /p:LayaEnableNet11=false /p:GeneratePackageOnBuild=true'
 
 - task: DotNetCoreCLI@2
-  displayName: 'build Laya.Training project'
+  displayName: 'build StructuredDecisions.Laya.Training project'
   inputs:
     command: 'build'
     projects: '$(projectTraining)'
+    arguments: '-c $(buildConfiguration) /p:Version=$(targetVersion) /p:LayaEnableNet11=false /p:GeneratePackageOnBuild=true'
+
+- task: DotNetCoreCLI@2
+  displayName: 'build StructuredDecisions.Mica project'
+  inputs:
+    command: 'build'
+    projects: '$(projectMica)'
     arguments: '-c $(buildConfiguration) /p:Version=$(targetVersion) /p:LayaEnableNet11=false /p:GeneratePackageOnBuild=true'
 
 - task: NuGetCommand@2

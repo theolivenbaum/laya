@@ -61,9 +61,9 @@ Status key: `[ ]` not started · `[~]` in progress · `[x]` done
 - [x] `.reference/` refreshed to upstream `c752770`
 - [x] Latin routing: Armenian, unaccented Romance words, Romanian, shared-word rule, undecided ≠ English
 - [x] Router lifecycle lock (#95), temperature clamp (#35), email disclaimer (#94), shortlist (#106)
-- [x] `ILanguageClassifier` + `Laya.Catalyst` for the plain-ASCII languages the heuristic cannot see
+- [x] `ILanguageClassifier` + `StructuredDecisions.Laya.Catalyst` for the plain-ASCII languages the heuristic cannot see
 
-## 8. Training (`Laya.Training`)
+## 8. Training (`StructuredDecisions.Laya.Training`)
 - [x] Backward pass for every layer, checkpointed; gradients match PyTorch autograd (tiny model and
       the real English checkpoint)
 - [x] RLCD objective, AdamW, cosine schedule, clipping, temperature calibration (types and buckets)
@@ -74,7 +74,7 @@ Status key: `[ ]` not started · `[~]` in progress · `[x]` done
 - [ ] Save optimizer state with the rolling checkpoint so a run can resume (the notebook cannot either)
 - [ ] Data parallelism across processes, the notebook's DDP
 
-## 9. Mica v0.5 4B (`Laya.Mica`, Qwen3.5 decoder)
+## 9. Mica v0.5 4B (`StructuredDecisions.Mica`, Qwen3.5 decoder)
 - [x] Qwen3.5 tokenizer: `Split` pre-tokenizer (hand-matched regex over runes), managed NFC
 - [x] bf16-resident panel GEMM (`PackedMatrixBf16`), sharded safetensors (`SafetensorsCheckpoint`)
 - [x] `Qwen35Model`: Gated DeltaNet, gated full attention with partial RoPE, SwiGLU, tied head
@@ -92,7 +92,7 @@ Status key: `[ ]` not started · `[~]` in progress · `[x]` done
 - [x] Explicit AVX-512 path with `LAYA_VECTOR_BITS` override
 - [x] `laya profile`: per-stage timings, allocation totals, in-process CPU sampling and allocation
       reports via `Memory.Introspect`
-- [x] `benchmarks/Laya.Benchmarks`: BenchmarkDotNet suites for the GEMM shapes, the elementwise
+- [x] `benchmarks/StructuredDecisions.Benchmarks`: BenchmarkDotNet suites for the GEMM shapes, the elementwise
       kernels and the whole forward pass, single- and multi-threaded
 - [x] `LayaRuntime.MaxDegreeOfParallelism` / `LAYA_THREADS`, so single-thread work is measurable
 - [x] Fix the accumulator spill in the GEMM inner loop (3x, single-threaded)
@@ -131,5 +131,5 @@ against PyTorch is not reachable in fp32 on this hardware.
   .NET 10 SDK, and writing intrinsics that could not be compiled or measured here would be a parity
   risk. `SimdOps.Capabilities` reports which target framework is actually running.
 - GPU execution is out of scope; this port is CPU/SIMD only.
-- Training lives in `Laya.Training`, a separate package, as the notebook lives outside the Python
+- Training lives in `StructuredDecisions.Laya.Training`, a separate package, as the notebook lives outside the Python
   package. It runs fp32 on the CPU where the notebook ran fp16 autocast on two GPUs.

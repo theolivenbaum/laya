@@ -1,0 +1,18 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework Condition="'$(LayaEnableNet11)' != 'true'">net10.0</TargetFramework>
+    <TargetFrameworks Condition="'$(LayaEnableNet11)' == 'true'">$(LayaTargetFrameworks)</TargetFrameworks>
+    <RootNamespace>StructuredDecisions.Mica</RootNamespace>
+    <AssemblyName>StructuredDecisions.Mica</AssemblyName>
+    <IsPackable>true</IsPackable>
+    <PackageId>StructuredDecisions.Mica</PackageId>
+    <Description>Mica v0.5 4B on the CPU: a Qwen3.5 decoder (Gated DeltaNet + gated attention) that answers typed questions with a probability for every allowed answer, read from one prefill. Weights download on demand.</Description>
+    <PackageTags>$(PackageTags);mica;qwen;qwen3.5;deltanet;llm-as-a-judge</PackageTags>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="../StructuredDecisions.Base/StructuredDecisions.Base.csproj" />
+  </ItemGroup>
+  <ItemGroup>
+    <EmbeddedResource Include="codebook_255.json" LogicalName="StructuredDecisions.Mica.codebook_255.json" />
+  </ItemGroup>
+</Project>

@@ -7,7 +7,7 @@
 
 **Typed decisions for .NET, in one forward pass — no Python, no PyTorch, no native dependency.**
 
-[![NuGet](https://img.shields.io/nuget/v/Laya?color=004880&label=NuGet)](https://www.nuget.org/packages/Laya)
+[![NuGet](https://img.shields.io/nuget/v/StructuredDecisions.Laya?color=004880&label=NuGet)](https://www.nuget.org/packages/StructuredDecisions.Laya)
 [![License](https://img.shields.io/badge/License-Apache%202.0-green.svg)](https://opensource.org/licenses/Apache-2.0)
 [![.NET](https://img.shields.io/badge/.NET-10%20%7C%2011-512BD4)](https://dotnet.microsoft.com/)
 [![Model](https://img.shields.io/badge/%F0%9F%A4%97%20Model-convaiinnovations%2Flaya-blue)](https://huggingface.co/convaiinnovations/laya)
@@ -21,9 +21,10 @@ Nothing is generated. There is no prompt to tune, no JSON to parse, no schema to
 nothing to hallucinate: the model scores the options *you* define and hands back numbers.
 
 ```csharp
-using Laya;
-using Laya.Io;
-using Laya.Runtime;
+using StructuredDecisions;
+using StructuredDecisions.Laya;
+using StructuredDecisions.Io;
+using StructuredDecisions.Laya.Io;
 
 using var agent = RemoteCheckpoint.English.Load();
 
@@ -39,17 +40,40 @@ It runs on the CPU, on managed SIMD (AVX2 / AVX-512 / NEON), and holds the model
 process — no service to call, no per-token bill, no data leaving the machine.
 
 This is a C# implementation of [Laya](https://github.com/NandhaKishorM/laya) by Convai
-Innovations, verified tensor-by-tensor against the original PyTorch implementation.
+Innovations, verified tensor-by-tensor against the original PyTorch implementation — and, in the same
+family, of [Mica v0.5 4B](#mica-a-4b-decoder-for-harder-decisions), a 4B decoder for the harder calls.
+
+| package | what it is |
+|---|---|
+| `StructuredDecisions.Base` | `IDecisionModel`, `Question`/`QuestionSet`/`Answer`, and the shared runtime: SIMD GEMM (fp32 and bf16), tokenizers, safetensors, downloads |
+| `StructuredDecisions.Laya` | Laya: ModernBERT + typed decision head, router, presets (formerly the `Laya` package) |
+| `StructuredDecisions.Laya.Catalyst` | a statistical language identifier for Laya's router |
+| `StructuredDecisions.Laya.Training` | fine-tuning Laya checkpoints on the CPU |
+| `StructuredDecisions.Mica` | Mica v0.5 4B: a Qwen3.5 decoder and Mica's request contract |
+
+Both models implement `IDecisionModel`, so code that asks questions does not care which one answers:
+
+```csharp
+IDecisionModel fast = RemoteCheckpoint.English.Load();
+IDecisionModel careful = MicaCheckpoint.Load();
+
+var questions = new QuestionSet().Add("refund", Question.Noul("Does the customer ask for a refund?"));
+var answer = fast.SystemOne(ticket, questions)["refund"];
+if (answer.Confidence < 0.8) answer = careful.SystemOne(ticket, questions)["refund"];
+```
 
 ---
 
 ## Install
 
 ```bash
-dotnet add package Laya
+dotnet add package StructuredDecisions.Laya     # Laya, the fast encoder (pulls in StructuredDecisions.Base)
+dotnet add package StructuredDecisions.Mica     # Mica v0.5 4B, the Qwen3.5 decoder
 ```
 
-Targets **.NET 10** and **.NET 11**. The package contains no model data: a checkpoint is
+Targets **.NET 10** and **.NET 11**. The `Laya`, `Laya.Catalyst` and `Laya.Training` packages are now
+`StructuredDecisions.Laya`, `StructuredDecisions.Laya.Catalyst` and `StructuredDecisions.Laya.Training`, with
+namespaces to match (`using StructuredDecisions; using StructuredDecisions.Laya;`). The package contains no model data: a checkpoint is
 downloaded on first use and cached, see [Checkpoints](#checkpoints).
 
 ---
@@ -172,7 +196,8 @@ against 0.050 for random guessing, while reporting high confidence. Use `Multili
 ### Downloading and caching
 
 ```csharp
-using Laya.Io;
+using StructuredDecisions.Io;
+using StructuredDecisions.Laya.Io;
 
 // Downloads on first use, then loads from the cache every time after.
 using var agent = RemoteCheckpoint.English.Load();
@@ -229,13 +254,13 @@ var result = agent.SystemOne(state, questions, quarter);   // also on Predict, R
 Qwen3.5-4B that answers the same kind of typed questions — yes/no (`noul`), `choice`, `score`, plus
 multi-answer choices, a "cannot grade" outcome and abstention — with a probability for every allowed
 answer, read from the next-token logits of one prefill. It is ten times Laya's size and reads up to
-32k tokens; Laya stays the fast path. `Laya.Mica` is a C# port of
+32k tokens; Laya stays the fast path. `StructuredDecisions.Mica` is a C# port of
 its runtime: the [request contract](https://github.com/akivet/Mica), the prompt, the label readout,
 and the Qwen3.5 decoder itself (Gated DeltaNet + gated attention), on the CPU, in fp32 compute over
 the checkpoint's bf16 weights.
 
 ```csharp
-using Laya.Mica;
+using StructuredDecisions.Mica;
 
 var mica = MicaCheckpoint.Load();                // sky7350/Mica-v0.5-4B from the hub, ~9.3 GB, cached
 var response = mica.SystemOne("""
@@ -312,11 +337,11 @@ see: a language is named only on a word no other list claims, and text it cannot
 carries non-English letters (Romanian, Polish, Czech, Turkish, Vietnamese, …) goes to the
 multilingual checkpoint rather than being assumed English. What it still cannot see is a plain-ASCII
 language it holds no list for — Indonesian, Swahili, Tagalog, Turkish with its letters stripped. For
-those, plug in a statistical language identifier; `Laya.Catalyst` wraps
+those, plug in a statistical language identifier; `StructuredDecisions.Laya.Catalyst` wraps
 [Catalyst](https://github.com/curiosity-ai/catalyst)'s (53 languages, model embedded, no download):
 
 ```csharp
-// dotnet add package Laya.Catalyst
+// dotnet add package StructuredDecisions.Laya.Catalyst
 var router = new Router { LanguageClassifier = await CatalystLanguageClassifier.CreateAsync() };
 router.Route("Saya ditagih dua kali untuk langganan saya bulan ini").Model;   // multilingual
 ```
@@ -366,12 +391,12 @@ laya mica-convert  Write the text-only Mica checkpoint for the model host
 ```
 
 ```bash
-dotnet run --project src/Laya.Cli -c Release -- download --model english
+dotnet run --project src/StructuredDecisions.Cli -c Release -- download --model english
 
-dotnet run --project src/Laya.Cli -c Release -- \
+dotnet run --project src/StructuredDecisions.Cli -c Release -- \
     predict --model english --preset triage --text "I was charged twice and nobody answers"
 
-dotnet run --project src/Laya.Cli -c Release -- \
+dotnet run --project src/StructuredDecisions.Cli -c Release -- \
     predict --model english \
             --question 'urgent=noul:Is this time critical?' \
             --question 'team=choice:Who handles this?|billing,support,security' \
@@ -382,7 +407,7 @@ dotnet run --project src/Laya.Cli -c Release -- \
 
 ## Fine-tuning
 
-`Laya.Training` fine-tunes a checkpoint on your own typed decisions, on the CPU. It is the C# port
+`StructuredDecisions.Laya.Training` fine-tunes a checkpoint on your own typed decisions, on the CPU. It is the C# port
 of the reference [Kaggle notebook](.reference/notebooks/laya_finetune_typed_decisions_2xT4_kaggle.ipynb):
 the same RLCD objective (a group-relative policy gradient over noisy logits, scored by a strictly
 proper reward, plus soft cross-entropy), AdamW with cosine annealing, gradient clipping, and
@@ -397,7 +422,7 @@ laya evaluate --model-dir artifacts/models/my-decisions --split test
 ```
 
 ```csharp
-using Laya.Training;
+using StructuredDecisions.Laya.Training;
 
 var cases = DecisionDataset.ReadJsonLines("train.jsonl");       // {state, questions, gold} per line
 var items = DecisionDataset.BuildItems(tokenizer, cases, maxLength: 512, headMaxLength: 192);
@@ -452,7 +477,7 @@ compared in one pass rather than generated one token at a time.
   transposed once into panels of two SIMD vectors, so the inner loop broadcasts one activation and
   multiply-accumulates a contiguous run of outputs — eight FMAs against two vector loads, unit
   stride stores, no horizontal reduction. See
-  [`PackedMatrix`](src/Laya/Numerics/PackedMatrix.cs) for why the *panel* layout, and not a plain
+  [`PackedMatrix`](src/StructuredDecisions.Base/Numerics/PackedMatrix.cs) for why the *panel* layout, and not a plain
   transpose, is what makes this pay.
 - **AVX-512 is used explicitly where it exists.** `Vector<T>` stays 256-bit on AVX-512 hardware
   unless the whole process opts in; a sustained GEMM is exactly the case that wants the wider
@@ -465,7 +490,7 @@ compared in one pass rather than generated one token at a time.
 - **Attention keeps the thing being summed in the lanes.** A dot product per query-key pair ends
   in a horizontal reduction, and a forward pass has ~14 million of those pairs. The keys are
   gathered transposed, so adjacent keys sit in adjacent lanes and a score vector finishes with a
-  plain store. See [`AttentionKernels`](src/Laya/Numerics/AttentionKernels.cs).
+  plain store. See [`AttentionKernels`](src/StructuredDecisions.Base/Numerics/AttentionKernels.cs).
 
 ---
 
@@ -500,11 +525,11 @@ Reproduce any of it:
 
 ```bash
 # End to end, with per-stage timings, allocation totals and a sampling profile
-dotnet run --project src/Laya.Cli -c Release -- profile \
+dotnet run --project src/StructuredDecisions.Cli -c Release -- profile \
     --model english --preset triage --text "…" --threads 1
 
 # BenchmarkDotNet: the GEMM shapes, the elementwise kernels, the whole forward pass
-dotnet run --project benchmarks/Laya.Benchmarks -c Release -- --filter '*Gemm*'
+dotnet run --project benchmarks/StructuredDecisions.Benchmarks -c Release -- --filter '*Gemm*'
 ```
 
 `laya profile` needs no external tooling: stage timings come from the model itself, and the CPU
@@ -529,11 +554,11 @@ checkpoint's gradients to ~1e-5, the RLCD loss and its logit gradient match the 
 the same random draws, AdamW and the cosine schedule match `torch.optim`, and training sequences
 match the notebook's `build_training_item` token for token.
 
-Golden dumps live in [`tests/Laya.Tests/Fixtures/`](tests/Laya.Tests/Fixtures), so the parity
+Golden dumps live in [`tests/StructuredDecisions.Tests/Fixtures/`](tests/StructuredDecisions.Tests/Fixtures), so the parity
 suite runs without Python:
 
 ```bash
-dotnet test tests/Laya.Tests -c Release     # tests needing weights skip themselves without them
+dotnet test tests/StructuredDecisions.Tests -c Release     # tests needing weights skip themselves without them
 ```
 
 To regenerate them, [`tools/`](tools) has the PyTorch dump-and-compare scripts, and
@@ -546,20 +571,24 @@ To regenerate them, [`tools/`](tools) has the PyTorch dump-and-compare scripts, 
 ```bash
 git clone https://github.com/theolivenbaum/laya.git
 cd laya
-dotnet build Laya.slnx -c Release
-dotnet test  tests/Laya.Tests -c Release
+dotnet build StructuredDecisions.slnx -c Release
+dotnet test  tests/StructuredDecisions.Tests -c Release
 ```
 
 The `net11.0` target is added automatically when an 11.x SDK is installed, so a .NET 10 SDK builds
 the repository unchanged; force it either way with `-p:LayaEnableNet11=true|false`.
 
 ```
-src/Laya/              the library: numerics, tokenizers, ModernBERT, decision head, runtime
-src/Laya.Cli/          the command line tool
-benchmarks/            BenchmarkDotNet suites for the kernels and the forward pass
-tests/Laya.Tests/      xunit tests, including the PyTorch parity fixtures
-tools/                 Python scripts that produce reference dumps
-.reference/            the original Python package, kept verbatim as the specification
+src/StructuredDecisions.Base/          IDecisionModel, questions and answers, numerics, tokenizers, I/O
+src/StructuredDecisions.Laya/          Laya: ModernBERT, decision head, router, presets
+src/StructuredDecisions.Laya.Catalyst/ statistical language identification for the router
+src/StructuredDecisions.Laya.Training/ fine-tuning on the CPU
+src/StructuredDecisions.Mica/          Mica v0.5 4B: the Qwen3.5 decoder and Mica's contract
+src/StructuredDecisions.Cli/           the `laya` command line tool
+benchmarks/                            BenchmarkDotNet suites for the kernels and the forward pass
+tests/StructuredDecisions.Tests/       xunit tests, including the PyTorch parity fixtures
+tools/                                 Python scripts that produce reference dumps
+.reference/                            the original Python package, kept verbatim as the specification
 ```
 
 [`CLAUDE.md`](CLAUDE.md) documents the architecture that has to be reproduced exactly, and the

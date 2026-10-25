@@ -6,7 +6,7 @@ instruction heads — plus the usual traps: whitespace runs that are added token
 emoji and surrogate pairs, and the literal special-token strings.
 
     python tools/dump_tokenizations.py --model-dir artifacts/models/english \
-        --out tests/Laya.Tests/Fixtures/tokenizer-english.json
+        --out tests/StructuredDecisions.Tests/Fixtures/tokenizer-english.json
 """
 import argparse
 import json

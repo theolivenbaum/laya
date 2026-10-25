@@ -14,20 +14,33 @@ is right unless there is a written note here saying otherwise.
 ## Layout
 
 ```
-.reference/            original Python package, tests, notebook, packaging (read-only spec)
-src/Laya/              the port: numerics, tokenizer, ModernBERT, decision head, runtime
-src/Laya/Mica/         Mica v0.5 4B: request contract, prompt, codebook, judge, checkpoint download/convert
-src/Laya.Catalyst/     optional statistical language identifier for the router (Catalyst)
-src/Laya.Training/     fine-tuning: backward pass, RLCD objective, AdamW, calibration, dataset
-src/Laya.Cli/          `laya` command line tool (predict, route, download, dump, bench, train, evaluate)
-tests/Laya.Tests/      xunit tests, including parity tests against dumped PyTorch tensors
-tools/                 Python helper scripts used only to produce reference dumps
-artifacts/             (gitignored) downloaded models and reference dumps
+.reference/                             original Python package, tests, notebook, packaging (read-only spec)
+src/StructuredDecisions.Base/           the shared base: IDecisionModel, Question/QuestionSet/Answer/DecisionResult,
+                                        numerics (fp32 + bf16 GEMM), tokenizers, safetensors, downloads, diagnostics
+src/StructuredDecisions.Laya/           Laya: ModernBERT, decision head, Agent, Router, presets, RemoteCheckpoint
+src/StructuredDecisions.Laya.Catalyst/  optional statistical language identifier for the router (Catalyst)
+src/StructuredDecisions.Laya.Training/  fine-tuning: backward pass, RLCD objective, AdamW, calibration, dataset
+src/StructuredDecisions.Mica/           Mica v0.5 4B: Qwen3.5 decoder, request contract, prompt, codebook, MicaJudge
+src/StructuredDecisions.Cli/            `laya` command line tool (predict, route, download, dump, bench, train, mica, …)
+tests/StructuredDecisions.Tests/        xunit tests, including parity tests against dumped PyTorch tensors
+benchmarks/StructuredDecisions.Benchmarks/  BenchmarkDotNet suites
+tools/                                  Python helper scripts used only to produce reference dumps
+artifacts/                              (gitignored) downloaded models and reference dumps
 ```
+
+Namespaces follow the projects: `StructuredDecisions` (+ `.Numerics`, `.Tokenizers`, `.Io`, `.Diagnostics`) in
+the base, `StructuredDecisions.Laya[.Models|.Runtime|.Io|.Catalyst|.Training]`, `StructuredDecisions.Mica[.Models]`.
+**The base references no model family**, and the model families never reference each other: anything two of
+them share moves down into the base. `IDecisionModel` is the contract every family implements; a question
+option a family cannot honour (`Multi`, `AllowCannotGrade`, `AbstainThreshold` on Laya) throws
+`NotSupportedException` instead of being ignored. Environment variables keep their `LAYA_` names
+(`LAYA_THREADS`, `LAYA_VECTOR_BITS`, `LAYA_HOME`, `LAYA_MODEL_BASE_URL`) and apply to every family.
 
 ## Packaging
 
-Three packages, `Laya`, `Laya.Catalyst` and `Laya.Training`, published on every push to `main` with a CalVer version by the Azure
+Five packages — `StructuredDecisions.Base`, `StructuredDecisions.Laya`, `StructuredDecisions.Laya.Catalyst`,
+`StructuredDecisions.Laya.Training` and `StructuredDecisions.Mica` (formerly `Laya`, `Laya.Catalyst`, `Laya.Training`) —
+published on every push to `main` with a CalVer version by the Azure
 DevOps pipeline in `.devops/azure-pipelines.yml` (`GeneratePackageOnBuild`, then
 `NuGetCommand@2` push through the `nuget-curiosity-org` service connection). **No model data is packaged.** `RemoteCheckpoint` downloads a
 checkpoint's five files on demand from `https://models.curiosity.ai/laya/`, laid out as
@@ -95,7 +108,7 @@ post-processor never runs; special ids come from `tokenizer_config.json`.
 
 - **Parity first, speed second.** Every layer has a dump-and-compare path
   (`laya dump-states`, `tools/dump_reference.py`). A change that improves throughput but
-  moves any layer's output beyond the tolerances in `tests/Laya.Tests/ParityTests.cs` is a
+  moves any layer's output beyond the tolerances in `tests/StructuredDecisions.Tests/ParityTests.cs` is a
   regression.
 - **Compute in fp32.** The checkpoints are stored fp16; weights are converted once at load.
   PyTorch on CPU also runs this model in fp32, so fp32 is what parity is measured against.
@@ -114,7 +127,7 @@ post-processor never runs; special ids come from `tokenizer_config.json`.
 
 `LanguageDetector` follows upstream `lang.py` exactly; `Router` with no `LanguageClassifier` routes
 exactly as the Python does, and `LatinRoutingTests` pins it. The one C#-only addition is
-`ILanguageClassifier` (`Laya.Catalyst` implements it), and its contract is narrow on purpose: it is
+`ILanguageClassifier` (`StructuredDecisions.Laya.Catalyst` implements it), and its contract is narrow on purpose: it is
 consulted only when the heuristic left a Latin-script state undecided *and* would route it English,
 and only for at least `MinimumWords` words. It can move a state to multilingual, never an identified
 one away from it. The decision reads `1 − P(en)`, not the top language's probability: Catalyst
@@ -123,7 +136,7 @@ threshold while "not English" stays certain — a top-1 rule made the tests flak
 
 ## Training
 
-`Laya.Training` ports the fine-tuning notebook. Parity rules apply to it as to inference:
+`StructuredDecisions.Laya.Training` ports the fine-tuning notebook. Parity rules apply to it as to inference:
 
 - **Gradients are checked against autograd, not reasoned about.** `tools/dump_training_reference.py`
   builds the reference `DecisionModel` on a tiny random ModernBERT (window shorter than the
@@ -146,7 +159,7 @@ same size is used), stale
 
 ## Mica (a second model family: Qwen3.5-4B)
 
-`Laya.Mica` runs [Mica v0.5 4B](https://huggingface.co/sky7350/Mica-v0.5-4B), a Qwen3.5-4B fine-tune that
+`StructuredDecisions.Mica` runs [Mica v0.5 4B](https://huggingface.co/sky7350/Mica-v0.5-4B), a Qwen3.5-4B fine-tune that
 answers Mica's `/v1/systemone` requests. It is not an encoder + head: it is a causal decoder whose answer is
 the softmax over the **label tokens' logits at the last prompt position** (`No`/`Yes`, or `A`…`Z`, `a`…`z`,
 then two-letter labels; `codebook_255.json`), temperature 1. The behavioural spec is Mica's runtime in
@@ -207,14 +220,14 @@ change. Three tools, in the order they are usually useful:
 
 ```bash
 # 1. Where does the time go, and what is allocated? Single-threaded by default.
-dotnet run --project src/Laya.Cli -c Release -- profile \
+dotnet run --project src/StructuredDecisions.Cli -c Release -- profile \
     --model-dir artifacts/models/english --preset triage --text "…" --threads 1 --no-trace
 
 # 2. Which method is on the CPU? (drops --no-trace: in-process sampling via Memory.Introspect)
-dotnet run --project src/Laya.Cli -c Release -- profile --model-dir … --preset triage --text "…"
+dotnet run --project src/StructuredDecisions.Cli -c Release -- profile --model-dir … --preset triage --text "…"
 
 # 3. Steady-state numbers for one kernel
-dotnet run --project benchmarks/Laya.Benchmarks -c Release -- --filter '*Gemm*'
+dotnet run --project benchmarks/StructuredDecisions.Benchmarks -c Release -- --filter '*Gemm*'
 ```
 
 `LAYA_THREADS=1` (or `--threads 1`) pins the kernels to one thread (per call, pass a `ParallelOptions`
@@ -254,10 +267,10 @@ One panel resident in L2, streamed against every row, is the structure that wins
 ## Build & test
 
 ```bash
-dotnet build Laya.slnx -c Release
-dotnet test  tests/Laya.Tests -c Release           # parity tests skip if no dumps present
-dotnet run --project src/Laya.Cli -- download --model english
-dotnet run --project src/Laya.Cli -- predict --preset triage --text "I was charged twice"
+dotnet build StructuredDecisions.slnx -c Release
+dotnet test  tests/StructuredDecisions.Tests -c Release           # parity tests skip if no dumps present
+dotnet run --project src/StructuredDecisions.Cli -- download --model english
+dotnet run --project src/StructuredDecisions.Cli -- predict --preset triage --text "I was charged twice"
 ```
 
 Model downloads and dumps land in `artifacts/` (gitignored). Nothing in CI downloads a
