@@ -165,7 +165,7 @@ def main():
 
     with open(os.path.join(args.model_dir, "config.json")) as f:
         config = Qwen3_5TextConfig(**json.load(f)["text_config"])
-    config._attn_implementation = "eager"
+    config._attn_implementation = "sdpa"     # with no mask: is_causal, never an n x n score matrix (prompts reach 7.9k tokens)
     with open(os.path.join(args.model_dir, "model.safetensors.index.json")) as f:
         weight_map = json.load(f)["weight_map"]
     handles = {}
@@ -196,14 +196,13 @@ def main():
 
     rotary = qm.Qwen3_5TextRotaryEmbedding(config)
     hidden = {v: [] for v in variants}
-    positions, masks = [], []
+    positions = []
     with torch.no_grad():
         for it in items:
             n = len(it["ids"])
             h0 = embed["fp32"][[where[t] for t in it["ids"]]][None]
             pos = torch.arange(n).view(1, 1, -1).expand(3, 1, -1)
             positions.append(rotary(h0, pos))
-            masks.append(torch.full((n, n), float("-inf")).triu(1)[None, None])
             for v in variants:
                 hidden[v].append(embed[v][[where[t] for t in it["ids"]]][None].clone())
 
@@ -243,8 +242,7 @@ def main():
                         if quantize is not None:
                             hooks.append(module.register_forward_pre_hook(lambda _m, inp, f=quantize: (f(inp[0]),)))
                 for p, it in enumerate(items):
-                    out = layer(hidden[v][p], position_embeddings=positions[p],
-                                attention_mask=masks[p] if kind == "full_attention" else None)
+                    out = layer(hidden[v][p], position_embeddings=positions[p], attention_mask=None)
                     hidden[v][p] = out[0] if isinstance(out, tuple) else out
                 for hk in hooks:
                     hk.remove()
