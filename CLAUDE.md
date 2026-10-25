@@ -185,7 +185,8 @@ The decoder (`Qwen35Model`, from transformers' `modeling_qwen3_5.py`):
 
 Rules that apply on top of the porting rules above:
 
-- **Weights stay bf16** (`PackedMatrixBf16`, ~7.8 GiB) and are widened inside the GEMM — exact, so compute
+- **Weights stay bf16** by default (`PackedMatrixBf16`, ~7.8 GiB; `WeightPrecision.Q8_0` is the opt-in, inexact
+  exception below) and are widened inside the GEMM — exact, so compute
   is still fp32. 4.2B parameters as fp32 do not fit in the 15 GB this was developed on.
 - **Parity is judged against fp64, not just torch fp32.** `tools/dump_mica_reference.py tiny` writes a tiny
   random Qwen3.5 (committed, `Fixtures/qwen35-tiny`) with an fp32 and an fp64 run; `Qwen35ParityTests`
@@ -230,6 +231,84 @@ Measured and **rejected**:
 | fp32 weights instead of bf16 (where memory allows) | 84 vs 122 GFLOP/s per core: the bf16 kernel is faster, it halves L2 traffic |
 | Flushing decays below 1e-10 (not just subnormals) | no change: tiny normal decays were never the problem, and it would not be exact |
 | Padding the 9216-float activation stride off a 4 KB multiple | no change |
+| int8 weights (Mica's own SmoothQuant W8A8 `int8/model-int8.safetensors`), `pmaddubsw`+`pmaddwd` zmm (sentence-transformers-sharp's `QGemm`) | 52 G MAC/s per core vs the bf16 kernel's 60. (`pmaddubsw` saturates with +128-offset activations; TensorSharp moves w's sign onto x instead, which stays exact.) |
+
+The two `vpdpbusd` rows this table used to carry ("ymm 56–60 G MAC/s, zmm roof 72 — not worth it") were a broken
+microbenchmark, not the instruction: the real Q8_0 kernel below sustains 124 G MAC/s per core in zmm and ~90 in ymm.
+Measure a kernel, not a loop that looks like one. This CPU also has AMX (`amx_int8`, `amx_bf16`) and AVX512-BF16,
+which .NET 10/11 expose neither of (`Avx10v1/v2` report unsupported).
+
+### What upstream's quantizations cost
+
+TensorSharp runs this family from GGUF (Q8_0, Unsloth's Q4_K_XL/Q4_K_M, IQ2_XXS, NVFP4); Mica publishes
+`mica-v0.5-4b-Q8_0.gguf` and `mica-v0.5-4b-IQ4_XS.gguf` (IQ4_XS matrices, Q5_K `in_proj_qkv`/`v_proj`, Q6_K
+embedding). `tools/measure_mica_quant.py` runs the 105 fixture prompts (52k tokens) layer by layer in fp32 with
+each file's matrices dequantized (`-w`), and also with ggml's CPU activation quantization (Q8_0 / Q8_K) on every
+matmul input (`-wa`, what llama.cpp computes; its f16 KV cache is not emulated). Against the exact path:
+
+| variant | mean \|Δp\| | p90 | worst | mean KL | same top-1 |
+|---|---|---|---|---|---|
+| Q8_0 weights | 0.0035 | 0.010 | 0.029 | 1.6e-4 | 100% |
+| Q8_0 as ggml runs it | 0.0060 | 0.018 | 0.060 | 4.2e-4 | 100% |
+| IQ4_XS weights | 0.037 | 0.113 | 0.413 | 1.7e-2 | 96.2% |
+| IQ4_XS as ggml runs it | 0.040 | 0.152 | 0.399 | 1.8e-2 | 96.2% |
+
+Q8_0's error is ~1000× the C# port's own (5e-6) but never changes an answer. IQ4_XS flips 4 of 105 answers (all
+near-ties, ≤ 0.58 confident) and flattens confident ones (0.81 → 0.58 on `multi_26`), which matters because the
+probabilities are the calibrated output. The weight error dominates: activation quantization adds little.
+llama.cpp's converter reorders the DeltaNet value heads (tiled vs `repeat_interleave`) and bakes `1 + w` into the
+norms; the tool matches heads back block by block and checks every matrix's error (Q8_0 0.54%, IQ4_XS ~7.8%).
+
+Speed and memory (`llama-bench -p 219 -n 0 -lm none`, llama.cpp `2280f0f` built `GGML_NATIVE`, against `laya mica-bench`
+on the same 219-token prompt, same day; peak RSS sampled from `/proc`):
+
+| runtime / format | 4 threads | 1 thread | vs C# bf16 | peak RSS |
+|---|---|---|---|---|
+| **C# bf16 (this port, exact)** | 44 tok/s (4.96 s) | 14 tok/s | 1.00× | 7.83 GiB weights (10.6 GiB peak while loading) |
+| llama.cpp BF16 | 31 | 8.4 | 0.71× | 8.2 GiB |
+| llama.cpp Q8_0, no repack (AVX-512 path) | 26 | 8.6 | 0.60× | 4.4 GiB |
+| llama.cpp Q8_0, AMX repack (default) | **76** | 22.5 | **1.73×** | 5.6 GiB |
+| llama.cpp IQ4_XS, no repack | 65 | 21.6 | 1.47× | 2.6 GiB |
+| llama.cpp IQ4_XS, AMX repack (default) | 62 | 19.2 | 1.41× | 3.1 GiB |
+
+llama.cpp's Q8_0 speed comes from AMX tiles; without them its Q8_0 is slower than this port's bf16.
+
+### The Q8_0 precision (`WeightPrecision.Q8_0`, `--precision q8_0`)
+
+`PackedMatrixQ8_0` computes what llama.cpp computes from `mica-v0.5-4b-Q8_0.gguf`, from the bf16 checkpoint:
+
+- **Weights** are quantized at load with ggml's `quantize_row_q8_0_ref` (32-value blocks, `d = amax/127` stored fp16,
+  `roundf(x · (1/d))`, ties away from zero). This reproduces Mica's published Q8_0 GGUF: all 248 layer matrices and the
+  token embedding are value-identical after undoing llama.cpp's DeltaNet head order. The tied embedding / LM head is
+  Q8_0 too (rows dequantized on lookup, label logits as a Q8_0 matmul). Norms, conv, `A_log`, `dt_bias` stay fp32.
+- **Activations** are quantized per matmul as ggml's x86 `quantize_row_q8_0` does — `id = 127/amax`, round half to
+  *even* (`_mm256_round_ps`); the two rounding rules are different and both are kept (`QuantizersRoundAsGgmlDoes`).
+- **The dot product** per 32-block is exact integer `vpdpbusd`: activations stored +128 as u8, the block accumulator
+  seeded with `−128 · Σw` (precomputed, int16), then `acc = fma(Σ, d_w · d_x, acc)` in fp32. Kernels: `Vnni512`
+  (`AvxVnni.V512`, .NET 11 only), `Vnni256` (AVX-VNNI ymm, .NET 10), `Portable` (scalar). All three are bit-identical
+  (`EveryKernelIsExactlyTheDefinition`). Tile 3 rows × 64 columns: 12 int + 12 float accumulators.
+- **Layout**: `[panel][K/4][64][4]` int8 (one `vpdpbusd` group per column), then per block fp32 scales and int16
+  negated sums — 1.19 bytes per weight.
+
+**Parity** cannot be fp32-tight against torch: activation quantization is discontinuous, so fp32-level input noise ε
+occasionally flips a value across a half step and costs √(2ε·step) instead of ε. One matmul alone agrees with
+torch's emulation to 1e-7 (tiny-model test); a full model is held to the **error budget** instead, like the fp64 rule —
+the C# Q8_0 model must be as far from the exact model as ggml's Q8_0 is (`dump_mica_reference.py checkpoint
+--precision q8_0` → `artifacts/dumps/q8_0/<name>/`, `MicaCheckpointParityTests.Q8_0MatchesTransformersComputingAsGgml`).
+On the gate prompt every layer is within 12% of ggml's distance (both 1.4e-2 → 5e-2), probabilities moved 0.012
+against ggml's 0.008.
+
+Measured (`laya mica-bench --precision …`, 219-token prompt, same machine as the tables above):
+
+| | load | 4 threads | 1 thread | vs bf16 | resident |
+|---|---|---|---|---|---|
+| bf16 (exact) | 28 s | 5.10 s (43 tok/s) | 14 tok/s | 1.00× | 9.9 GiB (7.83 weights) |
+| Q8_0, .NET 10 (`Vnni256`) | 22 s | 3.75 s (58 tok/s) | — | 1.36× | 5.6 GiB (4.61 weights) |
+| **Q8_0, .NET 11 (`Vnni512`)** | 22 s | **2.66 s (82 tok/s)** | 28 tok/s | **1.9×** | 5.2 GiB |
+| llama.cpp Q8_0 + AMX, for scale | | 76 tok/s | 22.5 | | 5.6 GiB |
+
+Whole requests (warm): gate 5.29 → 2.94 s, rag 2.43 → 1.29 s. Kernel alone, one core: 231–254 GFLOP/s against the bf16
+kernel's 105–117. AMX would be the next step; .NET has no intrinsics for it.
 
 Checkpoint files: hub `sky7350/Mica-v0.5-4B` pinned to `MicaCheckpoint.HubRevision` (config, two bf16 shards +
 index, tokenizer; the repo's GGUF/INT8 files are excluded by an exact-name filter). `laya mica-convert` writes
@@ -240,10 +319,11 @@ text-only `model.safetensors` (bf16 bytes copied unchanged) — for `https://mod
 
 `net10.0;net11.0`. The `net11.0` target is only added when an 11.x SDK is actually installed (see
 `Directory.Build.props`), so the repository still builds on a .NET 10 SDK; force it either way with
-`-p:LayaEnableNet11=true|false`. The two targets currently share their kernels — this port was
-developed against a .NET 10 SDK, and unverifiable intrinsics behind `#if NET11_0_OR_GREATER` would
-be a parity risk. `SimdOps.Capabilities` reports the running target framework, so a net11-only path
-has somewhere obvious to land.
+`-p:LayaEnableNet11=true|false`. The pipeline builds with the .NET 11 SDK and publishes both targets; the test and
+benchmark projects follow `LayaTargetFrameworks`, so `dotnet test` runs both where an 11 SDK is installed. The one
+net11-only kernel is `PackedMatrixQ8_0`'s `Vnni512` (`AvxVnni.V512`, behind `#if NET11_0_OR_GREATER`), and it is
+checked bit for bit against the scalar definition on every run. `SimdOps.Capabilities` reports the running target
+framework.
 
 ## Measuring before changing
 

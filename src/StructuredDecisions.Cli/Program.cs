@@ -103,6 +103,8 @@ internal static class Program
           --request-json <json> The same, inline; or --text/--state-json/--state-file with
           --questions <file>    … a questions object (or --questions-json)
           --source <where>      hub | host   (default: hub — sky7350/Mica-v0.5-4B)
+          --precision <p>       bf16 | q8_0  (default: bf16, exact; q8_0 is llama.cpp's Q8_0:
+                                ~60% of the memory, faster with VNNI, answers move slightly)
           --out <dir>           mica-dump / mica-convert output directory
 
         COMMON OPTIONS

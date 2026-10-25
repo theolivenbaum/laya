@@ -3,6 +3,7 @@ using System.Text.Json.Nodes;
 using StructuredDecisions.Diagnostics;
 using StructuredDecisions.Io;
 using StructuredDecisions.Mica.Models;
+using StructuredDecisions.Numerics;
 using StructuredDecisions.Tokenizers;
 
 namespace StructuredDecisions.Mica;
@@ -57,13 +58,17 @@ public sealed partial class MicaJudge : IDecisionModel
     /// Read the prompt header (the system turn every prompt starts with) once now, so that even the first request
     /// starts from its snapshot — as Mica's server does with <c>start_warm</c>. About a second at load.
     /// </param>
-    public static MicaJudge FromDirectory(string directory, bool warm = true)
+    /// <param name="precision">
+    /// <see cref="WeightPrecision.Q8_0"/> quantizes the weights at load as llama.cpp's Q8_0 does (about 60% of the memory,
+    /// faster where the CPU has VNNI); answers then move by what Q8_0 costs (CLAUDE.md, "What upstream's quantizations cost").
+    /// </param>
+    public static MicaJudge FromDirectory(string directory, bool warm = true, WeightPrecision precision = WeightPrecision.Bf16)
     {
         var config = Qwen35Config.Load(Path.Combine(directory, "config.json"));
         string tokenizerDirectory = File.Exists(Path.Combine(directory, "tokenizer.json")) ? directory : Path.Combine(directory, "tokenizer");
         var tokenizer = HuggingFaceTokenizer.FromDirectory(tokenizerDirectory);
         Qwen35Model model;
-        using (var weights = new SafetensorsCheckpoint(directory)) model = new Qwen35Model(config, weights);
+        using (var weights = new SafetensorsCheckpoint(directory)) model = new Qwen35Model(config, weights, precision: precision);
         var (temperature, bias) = ReadCalibration(Path.Combine(directory, "calibration.json"));
         var judge = new MicaJudge(model, tokenizer) { Temperature = temperature, NoulLogitBias = bias };
         if (warm) judge.Warm();

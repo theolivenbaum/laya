@@ -7,6 +7,7 @@ using StructuredDecisions.Diagnostics;
 using StructuredDecisions.Io;
 using StructuredDecisions.Laya.Io;
 using StructuredDecisions.Mica;
+using StructuredDecisions.Numerics;
 
 namespace StructuredDecisions.Cli;
 
@@ -57,9 +58,16 @@ internal static class MicaCommands
     {
         string directory = Directory(options);
         var stopwatch = Stopwatch.StartNew();
-        var judge = MicaJudge.FromDirectory(directory);
-        Console.Error.WriteLine(string.Format(CultureInfo.InvariantCulture, "loaded {0} ({1:F2} GiB of weights) in {2:F1} s",
-            directory, judge.Model.WeightBytes / (1024.0 * 1024 * 1024), stopwatch.Elapsed.TotalSeconds));
+        var precision = options.Value("precision")?.ToLowerInvariant() switch
+        {
+            null or "bf16" => WeightPrecision.Bf16,
+            "q8_0" or "q8" => WeightPrecision.Q8_0,
+            var other => throw new ArgumentException($"--precision must be bf16 or q8_0, not {other}."),
+        };
+        var judge = MicaJudge.FromDirectory(directory, precision: precision);
+        Console.Error.WriteLine(string.Format(CultureInfo.InvariantCulture, "loaded {0} as {1} ({2:F2} GiB of weights) in {3:F1} s",
+            directory, precision, judge.Model.WeightBytes / (1024.0 * 1024 * 1024), stopwatch.Elapsed.TotalSeconds)
+            + (precision == WeightPrecision.Q8_0 ? $", kernel {PackedMatrixQ8_0.BestKernel}" : ""));
         return judge;
     }
 

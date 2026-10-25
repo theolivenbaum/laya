@@ -13,6 +13,7 @@ public class PackedMatrixBf16Tests
     [InlineData(6, 12352, 64)]
     [InlineData(30, 128, 100)]      // the blocked kernel: whole tiles, a ragged tail, a partial 64-step slice
     [InlineData(219, 192, 9216)]    // and several reduction blocks
+    [InlineData(390, 64, 64)]       // one panel split into 16 row groups of 24: the last 6 rows used to be skipped
     public void MatchesTheWidenedFp32Kernel(int rows, int outFeatures, int inFeatures)
     {
         var random = new Random(rows * 31 + outFeatures);

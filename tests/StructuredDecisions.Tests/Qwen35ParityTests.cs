@@ -83,6 +83,58 @@ public class Qwen35ParityTests(ITestOutputHelper output)
         Assert.True(logitExact <= 2 * torchExact + 1e-7, $"logits: {logitExact:E2} from fp64, torch fp32 is {torchExact:E2}");
     }
 
+    /// <summary>
+    /// <see cref="WeightPrecision.Q8_0"/> against transformers running the same model as ggml computes Q8_0
+    /// (<c>tools/dump_mica_reference.py tiny-q8</c>: weights by <c>quantize_row_q8_0_ref</c>, every matmul input by the x86
+    /// quantizer). Both quantize activations, so an input a rounding apart can land a value on the other side of a
+    /// half step, and this random 64-wide model amplifies that layer by layer (Q8_0 itself moves its last layers by
+    /// 40-70%). So the first mixer, before anything compounds, is held to fp32-like agreement, every later tensor to a
+    /// fifth of what Q8_0 moves it from the exact model — and one matmul on its own to fp32 rounding.
+    /// </summary>
+    [Fact]
+    public void Q8_0MatchesTransformersComputingAsGgml()
+    {
+        var config = Qwen35Config.Load(Path.Combine(Fixture, "config.json"));
+        using var checkpoint = new SafetensorsCheckpoint(Fixture);
+        var model = new Qwen35Model(config, checkpoint, precision: WeightPrecision.Q8_0);
+        using var meta = JsonDocument.Parse(File.ReadAllText(Path.Combine(Fixture, "reference.json")));
+        int[] ids = [.. meta.RootElement.GetProperty("input_ids").EnumerateArray().Select(e => e.GetInt32())];
+        using var exact = new SafetensorsFile(Path.Combine(Fixture, "reference.safetensors"));
+        using var q8 = new SafetensorsFile(Path.Combine(Fixture, "reference-q8_0.safetensors"));
+        var recorder = new StateRecorder();
+        var last = model.Forward(ids, model.NewState(), recorder);
+
+        foreach (var state in recorder.States)
+        {
+            if (!q8.Contains(state.Name)) continue;
+            var reference = q8.ReadFloat32(state.Name);
+            double between = RelativeError(reference, state.Values);
+            double quantization = RelativeError(exact.ReadFloat32(state.Name), reference);
+            output.WriteLine($"{state.Name,-18} C# vs torch-q8 {between:E2}   q8 vs exact {quantization:E2}");
+            Assert.True(between <= MaxShare * quantization, $"{state.Name}: {between:E2} from torch-q8, q8 itself moves it {quantization:E2}");
+            if (state.Name == "layers.0.mixer") Assert.True(between < 1e-4, $"layers.0.mixer: {between:E2} from torch-q8");
+        }
+
+        var w = q8.ReadBFloat16Bits("matmul.w");
+        var x = q8.ReadFloat32("matmul.x");
+        var y = q8.ReadFloat32("matmul.y");
+        var product = new float[y.Length];
+        new PackedMatrixQ8_0(w, 96, 256).Multiply(x, 7, [], product);
+        double matmul = RelativeError(y, product);
+        output.WriteLine($"one matmul         C# vs torch-q8 {matmul:E2}");
+        Assert.True(matmul < 1e-6, $"one Q8_0 matmul: {matmul:E2} from torch-q8");
+
+        int[] all = [.. Enumerable.Range(0, config.VocabSize)];
+        var logits = new float[all.Length];
+        model.Logits(last, all, logits);
+        var q8Logits = q8.ReadFloat32("logits");
+        double logitsBetween = RelativeError(q8Logits, logits), logitsQuantization = RelativeError(exact.ReadFloat32("logits"), q8Logits);
+        output.WriteLine($"logits             C# vs torch-q8 {logitsBetween:E2}   q8 vs exact {logitsQuantization:E2}");
+        Assert.True(logitsBetween <= MaxShare * logitsQuantization, $"logits: {logitsBetween:E2} from torch-q8");
+    }
+
+    private const double MaxShare = 0.2;
+
     [Fact]
     public void ReadingInPiecesIsExactlyReadingAtOnce()
     {
