@@ -230,6 +230,9 @@ Measured and **rejected**:
 | fp32 weights instead of bf16 (where memory allows) | 84 vs 122 GFLOP/s per core: the bf16 kernel is faster, it halves L2 traffic |
 | Flushing decays below 1e-10 (not just subnormals) | no change: tiny normal decays were never the problem, and it would not be exact |
 | Padding the 9216-float activation stride off a 4 KB multiple | no change |
+| int8 weights (Mica's own SmoothQuant W8A8 `int8/model-int8.safetensors`), `pmaddubsw`+`pmaddwd` zmm (sentence-transformers-sharp's `QGemm`) | 52 G MAC/s per core vs the bf16 kernel's 60, and `pmaddubsw` saturates for weights near ±127 (their kernel clamps to ±64 + CSR outliers) |
+| int8 via `AvxVnni` `vpdpbusd` ymm (all .NET 10 exposes) | 56–60 G MAC/s: no faster than bf16 |
+| int8 via `AvxVnni.V512` `vpdpbusd` zmm (.NET 11 only) | register roof 72 G MAC/s, 6×4 tile 73: one instruction per ~2 cycles (single port) against two FMA ports. At most ~1.2× on the GEMMs before activation quantization, inexact, preview SDK — not worth it. Revisit on a CPU with AMX or two VNNI ports |
 
 Checkpoint files: hub `sky7350/Mica-v0.5-4B` pinned to `MicaCheckpoint.HubRevision` (config, two bf16 shards +
 index, tokenizer; the repo's GGUF/INT8 files are excluded by an exact-name filter). `laya mica-convert` writes
