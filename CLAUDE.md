@@ -232,7 +232,7 @@ Measured and **rejected**:
 | Padding the 9216-float activation stride off a 4 KB multiple | no change |
 | int8 weights (Mica's own SmoothQuant W8A8 `int8/model-int8.safetensors`), `pmaddubsw`+`pmaddwd` zmm (sentence-transformers-sharp's `QGemm`) | 52 G MAC/s per core vs the bf16 kernel's 60, and `pmaddubsw` saturates for weights near ±127 (their kernel clamps to ±64 + CSR outliers) |
 | int8 via `AvxVnni` `vpdpbusd` ymm (all .NET 10 exposes) | 56–60 G MAC/s: no faster than bf16 |
-| int8 via `AvxVnni.V512` `vpdpbusd` zmm (.NET 11 only) | register roof 72 G MAC/s, 6×4 tile 73: one instruction per ~2 cycles (single port) against two FMA ports. At most ~1.2× on the GEMMs before activation quantization, inexact, preview SDK — not worth it. Revisit on a CPU with AMX or two VNNI ports |
+| int8 via `AvxVnni.V512` `vpdpbusd` zmm (.NET 11 only) | register roof 72 G MAC/s, 6×4 tile 73: one instruction per ~2 cycles (single port) against two FMA ports. At most ~1.2× on the GEMMs before activation quantization, inexact, preview SDK — not worth it. This CPU *does* have AMX (`amx_int8`, `amx_bf16`) and AVX512-BF16, but .NET 10/11 expose neither (`Avx10v1/v2` report unsupported); see below |
 
 ### What upstream's quantizations cost
 
@@ -254,6 +254,23 @@ near-ties, ≤ 0.58 confident) and flattens confident ones (0.81 → 0.58 on `mu
 probabilities are the calibrated output. The weight error dominates: activation quantization adds little.
 llama.cpp's converter reorders the DeltaNet value heads (tiled vs `repeat_interleave`) and bakes `1 + w` into the
 norms; the tool matches heads back block by block and checks every matrix's error (Q8_0 0.54%, IQ4_XS ~7.8%).
+
+Speed and memory (`llama-bench -p 219 -n 0 -lm none`, llama.cpp `2280f0f` built `GGML_NATIVE`, against `laya mica-bench`
+on the same 219-token prompt, same day; peak RSS sampled from `/proc`):
+
+| runtime / format | 4 threads | 1 thread | vs C# bf16 | peak RSS |
+|---|---|---|---|---|
+| **C# bf16 (this port, exact)** | 44 tok/s (4.96 s) | 14 tok/s | 1.00× | 7.83 GiB weights (10.6 GiB peak while loading) |
+| llama.cpp BF16 | 31 | 8.4 | 0.71× | 8.2 GiB |
+| llama.cpp Q8_0, no repack (AVX-512 path) | 26 | 8.6 | 0.60× | 4.4 GiB |
+| llama.cpp Q8_0, AMX repack (default) | **76** | 22.5 | **1.73×** | 5.6 GiB |
+| llama.cpp IQ4_XS, no repack | 65 | 21.6 | 1.47× | 2.6 GiB |
+| llama.cpp IQ4_XS, AMX repack (default) | 62 | 19.2 | 1.41× | 3.1 GiB |
+
+The quantized speed-up over this port comes from AMX tile instructions (Q8_0) and llama.cpp's IQ4_XS × Q8_K
+VNNI kernel. .NET has no AMX intrinsics, so the Q8_0 number is out of reach without native code; IQ4_XS's
+non-AMX 1-thread rate (~77 G MAC/s) is at the measured `vpdpbusd` zmm roof, so a .NET 11 VNNI kernel could
+approach it, at the precision cost in the table above.
 
 Checkpoint files: hub `sky7350/Mica-v0.5-4B` pinned to `MicaCheckpoint.HubRevision` (config, two bf16 shards +
 index, tokenizer; the repo's GGUF/INT8 files are excluded by an exact-name filter). `laya mica-convert` writes
