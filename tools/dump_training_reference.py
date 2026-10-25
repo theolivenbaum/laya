@@ -5,7 +5,7 @@ one padded batch through it in eval mode (no dropout) with autograd on, and back
 linear function of the option logits. Writes a checkpoint directory the .NET side loads, plus the
 logits and every parameter's gradient, so `TrainingGradientTests` can compare them tensor by tensor.
 
-    python tools/dump_training_reference.py --out tests/Laya.Tests/Fixtures/training-tiny
+    python tools/dump_training_reference.py --out tests/StructuredDecisions.Tests/Fixtures/training-tiny
 
 Needs torch, transformers and safetensors. The checkpoint is saved in fp32, so the comparison measures
 the backward pass rather than fp16 rounding.

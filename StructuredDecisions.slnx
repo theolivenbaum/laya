@@ -1,0 +1,16 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/StructuredDecisions.Base/StructuredDecisions.Base.csproj" />
+    <Project Path="src/StructuredDecisions.Laya/StructuredDecisions.Laya.csproj" />
+    <Project Path="src/StructuredDecisions.Laya.Catalyst/StructuredDecisions.Laya.Catalyst.csproj" />
+    <Project Path="src/StructuredDecisions.Laya.Training/StructuredDecisions.Laya.Training.csproj" />
+    <Project Path="src/StructuredDecisions.Mica/StructuredDecisions.Mica.csproj" />
+    <Project Path="src/StructuredDecisions.Cli/StructuredDecisions.Cli.csproj" />
+  </Folder>
+  <Folder Name="/benchmarks/">
+    <Project Path="benchmarks/StructuredDecisions.Benchmarks/StructuredDecisions.Benchmarks.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/StructuredDecisions.Tests/StructuredDecisions.Tests.csproj" />
+  </Folder>
+</Solution>

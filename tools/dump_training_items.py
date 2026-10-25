@@ -2,7 +2,7 @@
 
     python tools/dump_training_items.py --model-dir artifacts/models/english \
         --data artifacts/data/LocalLLaMA_typed-decisions.all.train.jsonl --cases 10 \
-        --out tests/Laya.Tests/Fixtures/training-items-english.json
+        --out tests/StructuredDecisions.Tests/Fixtures/training-items-english.json
 
 `TrainingItemParityTests` builds the same items with `DecisionDataset.BuildItems` and compares token ids,
 marker positions and targets.
