@@ -246,6 +246,9 @@ public sealed class Qwen35Model
     public Qwen35Config Config => _config;
     public long WeightBytes { get; }
 
+    /// <summary>How the projections and the token table are kept: bf16 (exact) or ggml Q8_0.</summary>
+    public WeightPrecision Precision { get; }
+
     private sealed class Layer
     {
         public required Qwen35LayerKind Kind;
@@ -268,16 +271,21 @@ public sealed class Qwen35Model
         public ILinear? OutProjection;
     }
 
-    public Qwen35Model(Qwen35Config config, SafetensorsCheckpoint weights, string? prefix = null)
+    /// <param name="precision"><see cref="WeightPrecision.Q8_0"/> quantizes every projection and the tied embedding at load
+    /// with ggml's Q8_0 and multiplies them as ggml does (activations quantized too) — what llama.cpp runs from Mica's
+    /// <c>Q8_0.gguf</c>; norms, the conv kernel and the DeltaNet's gates stay fp32.</param>
+    public Qwen35Model(Qwen35Config config, SafetensorsCheckpoint weights, string? prefix = null,
+        WeightPrecision precision = WeightPrecision.Bf16)
     {
         if (!config.AttentionOutputGate) throw new NotSupportedException("Qwen3.5 without attn_output_gate is not implemented.");
         _config = config;
+        Precision = precision;
         prefix ??= weights.Contains("model.language_model.embed_tokens.weight") ? "model.language_model." : "model.";
 
-        _embeddings = TokenTable.Load(weights, prefix + "embed_tokens.weight", config.VocabSize, config.HiddenSize);
+        _embeddings = TokenTable.Load(weights, prefix + "embed_tokens.weight", config.HiddenSize, precision);
         _head = config.TieWordEmbeddings || !weights.Contains("lm_head.weight")
             ? _embeddings
-            : TokenTable.Load(weights, "lm_head.weight", config.VocabSize, config.HiddenSize);
+            : TokenTable.Load(weights, "lm_head.weight", config.HiddenSize, precision);
         _finalNorm = OnePlus(weights.ReadFloat32(prefix + "norm.weight"));
 
         int hidden = config.HiddenSize;
@@ -291,26 +299,26 @@ public sealed class Qwen35Model
                 Kind = kind,
                 InputNorm = OnePlus(weights.ReadFloat32(p + "input_layernorm.weight")),
                 PostAttentionNorm = OnePlus(weights.ReadFloat32(p + "post_attention_layernorm.weight")),
-                Mlp = Stack(weights, [p + "mlp.gate_proj.weight", p + "mlp.up_proj.weight"], hidden),
-                Down = Stack(weights, [p + "mlp.down_proj.weight"], config.IntermediateSize),
+                Mlp = Stack(weights, precision, [p + "mlp.gate_proj.weight", p + "mlp.up_proj.weight"], hidden),
+                Down = Stack(weights, precision, [p + "mlp.down_proj.weight"], config.IntermediateSize),
             };
             if (kind == Qwen35LayerKind.FullAttention)
             {
-                layer.Qkv = Stack(weights, [p + "self_attn.q_proj.weight", p + "self_attn.k_proj.weight", p + "self_attn.v_proj.weight"], hidden);
-                layer.Output = Stack(weights, [p + "self_attn.o_proj.weight"], config.NumAttentionHeads * config.HeadDim);
+                layer.Qkv = Stack(weights, precision, [p + "self_attn.q_proj.weight", p + "self_attn.k_proj.weight", p + "self_attn.v_proj.weight"], hidden);
+                layer.Output = Stack(weights, precision, [p + "self_attn.o_proj.weight"], config.NumAttentionHeads * config.HeadDim);
                 layer.QueryNorm = OnePlus(weights.ReadFloat32(p + "self_attn.q_norm.weight"));
                 layer.KeyNorm = OnePlus(weights.ReadFloat32(p + "self_attn.k_norm.weight"));
             }
             else
             {
                 string a = p + "linear_attn.";
-                layer.InProjection = Stack(weights,
+                layer.InProjection = Stack(weights, precision,
                     [a + "in_proj_qkv.weight", a + "in_proj_z.weight", a + "in_proj_b.weight", a + "in_proj_a.weight"], hidden);
                 layer.ConvWeight = Transpose(weights.ReadFloat32(a + "conv1d.weight"), config.LinearConvDim, config.LinearConvKernel);
                 layer.NegativeA = [.. weights.ReadFloat32(a + "A_log").Select(v => -MathF.Exp(v))];
                 layer.DtBias = weights.ReadFloat32(a + "dt_bias");
                 layer.GatedNorm = weights.ReadFloat32(a + "norm.weight");
-                layer.OutProjection = Stack(weights, [a + "out_proj.weight"], config.LinearValueDim);
+                layer.OutProjection = Stack(weights, precision, [a + "out_proj.weight"], config.LinearValueDim);
             }
             _layers[i] = layer;
         }
@@ -350,7 +358,7 @@ public sealed class Qwen35Model
     /// a layer's sibling projections run as one GEMM. Each output column is computed independently, so
     /// stacking changes no value. bf16 weights stay bf16; anything else is widened to fp32.
     /// </summary>
-    private static ILinear Stack(SafetensorsCheckpoint weights, string[] names, int inFeatures)
+    private static ILinear Stack(SafetensorsCheckpoint weights, WeightPrecision precision, string[] names, int inFeatures)
     {
         var entries = names.Select(weights.Entry).ToArray();
         foreach (var entry in entries)
@@ -363,6 +371,14 @@ public sealed class Qwen35Model
         int outFeatures = entries.Sum(e => e.Shape[0]);
         if (entries.All(e => e.DType == "BF16"))
         {
+            if (precision == WeightPrecision.Q8_0)
+            {
+                // Each output row is quantized on its own, so stacking first changes nothing; quantize part by part.
+                var parts = names.Select(n => weights.ReadBFloat16Bits(n)).ToArray();
+                return parts.Length == 1
+                    ? new PackedMatrixQ8_0(parts[0], outFeatures, inFeatures)
+                    : new PackedMatrixQ8_0(Concatenate(parts), outFeatures, inFeatures);
+            }
             if (names.Length == 1) return new PackedMatrixBf16(weights.ReadBFloat16Bits(names[0]), outFeatures, inFeatures);
             var stacked = new ushort[(long)outFeatures * inFeatures];
             long offset = 0;
@@ -383,7 +399,21 @@ public sealed class Qwen35Model
             part.CopyTo(values.AsSpan((int)at));
             at += part.Length;
         }
-        return new PackedMatrix(values, outFeatures, inFeatures);
+        return precision == WeightPrecision.Q8_0
+            ? new PackedMatrixQ8_0(values, outFeatures, inFeatures)
+            : new PackedMatrix(values, outFeatures, inFeatures);
+    }
+
+    private static ushort[] Concatenate(ushort[][] parts)
+    {
+        var all = new ushort[parts.Sum(p => (long)p.Length)];
+        long at = 0;
+        foreach (var part in parts)
+        {
+            part.CopyTo(all, at);
+            at += part.Length;
+        }
+        return all;
     }
 
     private readonly StateBufferPool _pool = new();
@@ -555,6 +585,11 @@ public sealed class Qwen35Model
     /// <summary>The LM head's logits for just <paramref name="ids"/>: <c>hidden · E[id]</c>.</summary>
     public void Logits(ReadOnlySpan<float> hidden, ReadOnlySpan<int> ids, Span<float> logits)
     {
+        if (_head.IsQuantized)
+        {
+            _head.QuantizedLogits(hidden, ids, logits);
+            return;
+        }
         var buffer = new float[_config.HiddenSize];
         for (int i = 0; i < ids.Length; ++i)
         {
@@ -964,39 +999,84 @@ public sealed class Qwen35Model
         Parallel.For(0, rows, DecisionRuntime.Resolve(parallel), body);
     }
 
-    /// <summary>The embedding table (and, tied, the LM head), kept in bf16 when the checkpoint is.</summary>
+    /// <summary>
+    /// The embedding table (and, tied, the LM head): bf16 when the checkpoint is, or ggml Q8_0 rows — looked up
+    /// dequantized (ggml's <c>get_rows</c>), multiplied against a Q8_0-quantized hidden state (ggml's <c>mul_mat</c>).
+    /// </summary>
     private sealed class TokenTable
     {
         private readonly ushort[]? _bf16;
         private readonly float[]? _fp32;
+        private readonly sbyte[]? _q8;
+        private readonly float[]? _q8Scales;
         private readonly int _rows, _width;
 
-        private TokenTable(ushort[]? bf16, float[]? fp32, int rows, int width)
+        private TokenTable(ushort[]? bf16, float[]? fp32, sbyte[]? q8, float[]? q8Scales, int rows, int width)
         {
             _bf16 = bf16;
             _fp32 = fp32;
+            _q8 = q8;
+            _q8Scales = q8Scales;
             _rows = rows;
             _width = width;
         }
 
-        public long Bytes => _bf16 is not null ? _bf16.LongLength * 2 : _fp32!.LongLength * 4;
+        public bool IsQuantized => _q8 is not null;
 
-        public static TokenTable Load(SafetensorsCheckpoint weights, string name, int rows, int width)
+        public long Bytes => _q8 is not null ? _q8.LongLength + _q8Scales!.LongLength * 4
+            : _bf16 is not null ? _bf16.LongLength * 2 : _fp32!.LongLength * 4;
+
+        public static TokenTable Load(SafetensorsCheckpoint weights, string name, int width, WeightPrecision precision)
         {
             var entry = weights.Entry(name);
             if (entry.Shape.Length != 2 || entry.Shape[1] != width)
             {
                 throw new InvalidDataException($"{name}: expected [*, {width}], found [{string.Join(", ", entry.Shape)}].");
             }
-            rows = entry.Shape[0];
+            int rows = entry.Shape[0];
+            if (precision == WeightPrecision.Q8_0) return Quantize(weights, name, entry.DType == "BF16", rows, width);
             return entry.DType == "BF16"
-                ? new TokenTable(weights.ReadBFloat16Bits(name), null, rows, width)
-                : new TokenTable(null, weights.ReadFloat32(name), rows, width);
+                ? new TokenTable(weights.ReadBFloat16Bits(name), null, null, null, rows, width)
+                : new TokenTable(null, weights.ReadFloat32(name), null, null, rows, width);
+        }
+
+        private static TokenTable Quantize(SafetensorsCheckpoint weights, string name, bool bf16, int rows, int width)
+        {
+            int blocks = width / Q8_0.BlockSize;
+            var q = new sbyte[(long)rows * width];
+            var scales = new float[(long)rows * blocks];
+            ushort[]? bits = bf16 ? weights.ReadBFloat16Bits(name) : null;
+            float[]? values = bf16 ? null : weights.ReadFloat32(name);
+            Parallel.For(0, rows, r =>
+            {
+                Span<float> row = stackalloc float[width];
+                if (bits is not null)
+                {
+                    var source = bits.AsSpan((int)((long)r * width), width);
+                    for (int i = 0; i < width; ++i) row[i] = BitConverter.UInt32BitsToSingle((uint)source[i] << 16);
+                }
+                else values.AsSpan((int)((long)r * width), width).CopyTo(row);
+                for (int b = 0; b < blocks; ++b)
+                {
+                    scales[(long)r * blocks + b] = Q8_0.QuantizeWeightBlock(row.Slice(b * Q8_0.BlockSize, Q8_0.BlockSize),
+                        q.AsSpan((int)((long)r * width + b * Q8_0.BlockSize), Q8_0.BlockSize));
+                }
+            });
+            return new TokenTable(null, null, q, scales, rows, width);
         }
 
         public void Row(int id, Span<float> destination)
         {
             if ((uint)id >= (uint)_rows) throw new ArgumentOutOfRangeException(nameof(id), $"token id {id} is outside the vocabulary.");
+            if (_q8 is not null)
+            {
+                int blocks = _width / Q8_0.BlockSize;
+                for (int i = 0; i < _width; ++i)
+                {
+                    destination[i] = _q8[(long)id * _width + i] * _q8Scales![(long)id * blocks + i / Q8_0.BlockSize];
+                }
+                return;
+            }
             if (_fp32 is not null)
             {
                 _fp32.AsSpan(id * _width, _width).CopyTo(destination);
@@ -1004,6 +1084,30 @@ public sealed class Qwen35Model
             }
             var source = _bf16.AsSpan((int)((long)id * _width), _width);
             for (int i = 0; i < _width; ++i) destination[i] = BitConverter.UInt32BitsToSingle((uint)source[i] << 16);
+        }
+
+        /// <summary><c>hidden · E[id]</c> as ggml's Q8_0 <c>mul_mat</c> takes it: per block an exact integer dot, scaled by
+        /// <c>d_w · d_x</c>, summed in fp32 — the operations <see cref="PackedMatrixQ8_0"/> does.</summary>
+        public void QuantizedLogits(ReadOnlySpan<float> hidden, ReadOnlySpan<int> ids, Span<float> logits)
+        {
+            int blocks = _width / Q8_0.BlockSize;
+            var qx = new byte[_width];
+            var dx = new float[blocks];
+            Q8_0.QuantizeActivations(hidden, 1, _width, _width, qx, dx);
+            for (int i = 0; i < ids.Length; ++i)
+            {
+                int id = ids[i];
+                if ((uint)id >= (uint)_rows) throw new ArgumentOutOfRangeException(nameof(ids), $"token id {id} is outside the vocabulary.");
+                float acc = 0f;
+                for (int b = 0; b < blocks; ++b)
+                {
+                    int sum = 0;
+                    long w = (long)id * _width + b * Q8_0.BlockSize;
+                    for (int t = 0; t < Q8_0.BlockSize; ++t) sum += (qx[b * Q8_0.BlockSize + t] - 128) * _q8![w + t];
+                    acc = MathF.FusedMultiplyAdd(sum, _q8Scales![(long)id * blocks + b] * dx[b], acc);
+                }
+                logits[i] = acc;
+            }
         }
     }
 }

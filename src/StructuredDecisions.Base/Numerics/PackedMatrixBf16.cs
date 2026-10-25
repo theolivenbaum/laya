@@ -107,7 +107,7 @@ public sealed class PackedMatrixBf16 : ILinear
             // each row is computed independently, so the split changes no value.
             int rowGroups = 1;
             while (_panels * rowGroups < workers * 8 && rows / (rowGroups * 2) >= 4 * RowTile) rowGroups *= 2;
-            int groupRows = (rows / rowGroups + RowTile - 1) / RowTile * RowTile;
+            int groupRows = ((rows + rowGroups - 1) / rowGroups + RowTile - 1) / RowTile * RowTile;   // round up: every row lands in a group
             int chunk = Math.Max(1, _panels * rowGroups / (workers * 4));
             int items = _panels * rowGroups;
             int chunks = (items + chunk - 1) / chunk;

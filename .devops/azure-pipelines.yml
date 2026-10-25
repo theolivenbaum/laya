@@ -31,12 +31,13 @@ steps:
       Write-Host "##vso[task.setvariable variable=targetVersion;]$newTargetVersion"
       Write-Host "Updated targetVersion to '$newTargetVersion'"
 
+# The .NET 11 SDK builds both targets: net11.0 carries the kernels .NET 10 cannot express (512-bit VNNI for Q8_0).
 - task: UseDotNet@2
-  displayName: 'Use .NET 10.0 SDK'
+  displayName: 'Use .NET 11.0 SDK'
   inputs:
     packageType: sdk
-    version: 10.x
-    includePreviewVersions: false
+    version: 11.x
+    includePreviewVersions: true
     installationPath: $(Agent.ToolsDirectory)/dotnet
 
 - task: DotNetCoreCLI@2
@@ -45,42 +46,41 @@ steps:
     command: 'restore'
     projects: '$(solution)'
 
-# LayaEnableNet11=false pins the published target frameworks to what this repository has been
-# measured on, whatever SDKs the hosted image happens to carry.
+# LayaEnableNet11=true publishes net10.0 and net11.0 whatever SDKs the hosted image happens to carry.
 - task: DotNetCoreCLI@2
   displayName: 'build StructuredDecisions.Base project'
   inputs:
     command: 'build'
     projects: '$(projectBase)'
-    arguments: '-c $(buildConfiguration) /p:Version=$(targetVersion) /p:LayaEnableNet11=false /p:GeneratePackageOnBuild=true'
+    arguments: '-c $(buildConfiguration) /p:Version=$(targetVersion) /p:LayaEnableNet11=true /p:GeneratePackageOnBuild=true'
 
 - task: DotNetCoreCLI@2
   displayName: 'build StructuredDecisions.Laya project'
   inputs:
     command: 'build'
     projects: '$(projectLaya)'
-    arguments: '-c $(buildConfiguration) /p:Version=$(targetVersion) /p:LayaEnableNet11=false /p:GeneratePackageOnBuild=true'
+    arguments: '-c $(buildConfiguration) /p:Version=$(targetVersion) /p:LayaEnableNet11=true /p:GeneratePackageOnBuild=true'
 
 - task: DotNetCoreCLI@2
   displayName: 'build StructuredDecisions.Laya.Catalyst project'
   inputs:
     command: 'build'
     projects: '$(projectCatalyst)'
-    arguments: '-c $(buildConfiguration) /p:Version=$(targetVersion) /p:LayaEnableNet11=false /p:GeneratePackageOnBuild=true'
+    arguments: '-c $(buildConfiguration) /p:Version=$(targetVersion) /p:LayaEnableNet11=true /p:GeneratePackageOnBuild=true'
 
 - task: DotNetCoreCLI@2
   displayName: 'build StructuredDecisions.Laya.Training project'
   inputs:
     command: 'build'
     projects: '$(projectTraining)'
-    arguments: '-c $(buildConfiguration) /p:Version=$(targetVersion) /p:LayaEnableNet11=false /p:GeneratePackageOnBuild=true'
+    arguments: '-c $(buildConfiguration) /p:Version=$(targetVersion) /p:LayaEnableNet11=true /p:GeneratePackageOnBuild=true'
 
 - task: DotNetCoreCLI@2
   displayName: 'build StructuredDecisions.Mica project'
   inputs:
     command: 'build'
     projects: '$(projectMica)'
-    arguments: '-c $(buildConfiguration) /p:Version=$(targetVersion) /p:LayaEnableNet11=false /p:GeneratePackageOnBuild=true'
+    arguments: '-c $(buildConfiguration) /p:Version=$(targetVersion) /p:LayaEnableNet11=true /p:GeneratePackageOnBuild=true'
 
 - task: NuGetCommand@2
   displayName: 'push all nuget packages'

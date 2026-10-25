@@ -1,6 +1,7 @@
 <Project Sdk="Microsoft.NET.Sdk">
   <PropertyGroup>
-    <TargetFramework>net10.0</TargetFramework>
+    <TargetFramework Condition="'$(LayaEnableNet11)' != 'true'">net10.0</TargetFramework>
+    <TargetFrameworks Condition="'$(LayaEnableNet11)' == 'true'">$(LayaTargetFrameworks)</TargetFrameworks>
     <RootNamespace>StructuredDecisions.Tests</RootNamespace>
     <IsPackable>false</IsPackable>
     <IsTestProject>true</IsTestProject>
