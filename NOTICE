@@ -25,6 +25,15 @@ published at https://huggingface.co/convaiinnovations/laya (Apache-2.0) and
 mirrored at https://models.curiosity.ai/laya/, from where this software
 downloads them on first use; they remain subject to that licence.
 
+Mica support (Laya.Mica) ports the request contract, prompt and readout of
+Mica v0.5 4B by akivet (https://github.com/akivet/Mica, Apache-2.0); its output
+codebook (src/Laya/Mica/codebook_255.json) and contract test fixtures
+(tests/Laya.Tests/Fixtures/mica-contract-cases.json) are included unmodified.
+The Mica weights are downloaded on first use from
+https://huggingface.co/sky7350/Mica-v0.5-4B (Apache-2.0) or from
+https://models.curiosity.ai/laya/mica/; Mica is a fine-tune of Qwen/Qwen3.5-4B,
+Copyright Alibaba Cloud, Apache-2.0.
+
 The checkpoints are trained on top of these base encoders:
 
   * answerdotai/ModernBERT-large — Apache-2.0

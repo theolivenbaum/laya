@@ -59,3 +59,26 @@ internal sealed class ModelFactAttribute : FactAttribute
         }
     }
 }
+
+/// <summary>
+/// A fact that needs the Mica checkpoint in <c>artifacts/models/mica</c>: its tokenizer only, or the
+/// 8 GB of weights as well.
+/// </summary>
+internal sealed class MicaFactAttribute : FactAttribute
+{
+    public static string Directory => TestModels.CheckpointDirectory("mica");
+
+    public static bool HasTokenizer => File.Exists(Path.Combine(Directory, "tokenizer.json"));
+
+    public static bool HasWeights => File.Exists(Path.Combine(Directory, "model.safetensors"))
+        || File.Exists(Path.Combine(Directory, "model.safetensors.index.json"));
+
+    public MicaFactAttribute(bool weights = false)
+    {
+        if (!HasTokenizer || (weights && !HasWeights))
+        {
+            Skip = $"the Mica checkpoint is not in {Directory}; run: dotnet run --project src/Laya.Cli -- " +
+                   "download --model mica --cache artifacts/models-cache";
+        }
+    }
+}

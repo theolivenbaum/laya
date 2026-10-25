@@ -11,4 +11,8 @@
     <Description>Fast, non-autoregressive System 1 decision engine with calibrated probabilities.</Description>
     <ServerGarbageCollection>true</ServerGarbageCollection>
   </PropertyGroup>
+  <ItemGroup>
+    <EmbeddedResource Include="Tokenizers/UnicodeNfc.data" LogicalName="Laya.Tokenizers.UnicodeNfc.data" />
+    <EmbeddedResource Include="Mica/codebook_255.json" LogicalName="Laya.Mica.codebook_255.json" />
+  </ItemGroup>
 </Project>

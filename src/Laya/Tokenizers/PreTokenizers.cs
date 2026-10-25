@@ -120,6 +120,7 @@ internal static class PreTokenizerFactory
                 element.TryGetProperty("prepend_scheme", out var ps) ? ps.GetString() ?? "always" : "always",
                 !element.TryGetProperty("split", out var sp) || sp.GetBoolean()),
             "WhitespaceSplit" => new WhitespaceSplitPreTokenizer(),
+            "Split" => SplitPreTokenizer.Create(element),
             "Sequence" => CreateSequence(element),
             _ => throw new NotSupportedException($"tokenizer.json pre_tokenizer '{type}' is not implemented."),
         };

@@ -10,12 +10,14 @@ public interface INormalizer
     string Normalize(string text);
 }
 
-/// <summary>Unicode normalization form C, the ModernBERT tokenizer's normalizer.</summary>
+/// <summary>
+/// Unicode normalization form C, the ModernBERT and Qwen3.5 tokenizers' normalizer. Managed
+/// (<see cref="UnicodeNfc"/>) because <see cref="string.Normalize()"/> is a no-op outside ASCII under
+/// <c>InvariantGlobalization</c>, which Laya builds with.
+/// </summary>
 public sealed class NfcNormalizer : INormalizer
 {
-    public string Normalize(string text) => text.IsNormalized(NormalizationForm.FormC)
-        ? text
-        : text.Normalize(NormalizationForm.FormC);
+    public string Normalize(string text) => UnicodeNfc.Normalize(text);
 }
 
 public sealed class NfkcNormalizer : INormalizer

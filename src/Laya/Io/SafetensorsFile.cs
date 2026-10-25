@@ -89,6 +89,9 @@ public sealed class SafetensorsFile : IDisposable
 
     public bool Contains(string name) => Entries.ContainsKey(name);
 
+    /// <summary>File offset of the tensor data; an entry's bytes are at <c>DataOffset + Start .. DataOffset + End</c>.</summary>
+    public long DataOffset => _dataStart;
+
     public SafetensorsEntry Entry(string name) => Entries.TryGetValue(name, out var entry)
         ? entry
         : throw new KeyNotFoundException($"{Path}: no tensor named '{name}'. " +
@@ -150,6 +153,33 @@ public sealed class SafetensorsFile : IDisposable
         {
             _view.SafeMemoryMappedViewHandle.ReleasePointer();
         }
+    }
+
+    /// <summary>
+    /// Reads a BF16 tensor as its raw 16-bit patterns, without widening. A 4B-parameter checkpoint
+    /// does not fit in memory as fp32, so its projections stay bf16 and are widened inside the GEMM —
+    /// bit-for-bit the same fp32 values a load-time conversion would produce.
+    /// </summary>
+    public unsafe ushort[] ReadBFloat16Bits(string name)
+    {
+        var entry = Entry(name);
+        if (entry.DType != "BF16") throw new NotSupportedException($"{name}: expected BF16, the tensor is {entry.DType}.");
+        long count = entry.ElementCount;
+        if (count > int.MaxValue) throw new NotSupportedException($"{name}: tensor has {count} elements.");
+        Expect(entry.End - entry.Start, count * 2, entry);
+
+        var result = new ushort[count];
+        byte* basePointer = null;
+        _view.SafeMemoryMappedViewHandle.AcquirePointer(ref basePointer);
+        try
+        {
+            new ReadOnlySpan<ushort>(basePointer + _dataStart + entry.Start, (int)count).CopyTo(result);
+        }
+        finally
+        {
+            _view.SafeMemoryMappedViewHandle.ReleasePointer();
+        }
+        return result;
     }
 
     private static void Expect(long actual, long expected, SafetensorsEntry entry)

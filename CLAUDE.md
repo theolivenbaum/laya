@@ -16,6 +16,7 @@ is right unless there is a written note here saying otherwise.
 ```
 .reference/            original Python package, tests, notebook, packaging (read-only spec)
 src/Laya/              the port: numerics, tokenizer, ModernBERT, decision head, runtime
+src/Laya/Mica/         Mica v0.5 4B: request contract, prompt, codebook, judge, checkpoint download/convert
 src/Laya.Catalyst/     optional statistical language identifier for the router (Catalyst)
 src/Laya.Training/     fine-tuning: backward pass, RLCD objective, AdamW, calibration, dataset
 src/Laya.Cli/          `laya` command line tool (predict, route, download, dump, bench, train, evaluate)
@@ -143,6 +144,53 @@ same size is used), stale
   `temperature_by_options` buckets surviving the fit (they are refitted and replaced), and fitted
   temperatures outside the clamp range (they are clamped to what inference applies).
 
+## Mica (a second model family: Qwen3.5-4B)
+
+`Laya.Mica` runs [Mica v0.5 4B](https://huggingface.co/sky7350/Mica-v0.5-4B), a Qwen3.5-4B fine-tune that
+answers Mica's `/v1/systemone` requests. It is not an encoder + head: it is a causal decoder whose answer is
+the softmax over the **label tokens' logits at the last prompt position** (`No`/`Yes`, or `A`…`Z`, `a`…`z`,
+then two-letter labels; `codebook_255.json`), temperature 1. The behavioural spec is Mica's runtime in
+github.com/akivet/Mica — `mica/contract.py`, `mica/native.py`, `mica/codebook.py`, `mica/calibration.py`
+(the `v0.5/serving/lib` HF runtime is obfuscated but renders the same prompt; it escapes every added token
+of the tokenizer, which is what `MicaPrompt` does). Long-input mode (`llama_set_upper_stale`) is an
+approximation in their server and is deliberately not ported; this is their exact path.
+
+The decoder (`Qwen35Model`, from transformers' `modeling_qwen3_5.py`):
+
+1. 32 pre-norm layers, `layer_types` from the config: three Gated DeltaNet layers, then one full-attention
+   layer, repeated. Every layer ends in a SwiGLU MLP. Vision tower and `mtp.*` are never loaded.
+2. **RMSNorm is zero-centred**: `x * rsqrt(mean(x²) + eps) * (1 + w)` — for the input/post-attention norms,
+   the final norm and q/k norms. The DeltaNet's output norm (`RMSNormGated`) is the plain `w * norm(x) * silu(z)`.
+3. Full attention: `q_proj` emits `[q | gate]` **per head** (heads × 2 × 256), q/k RMSNorm per head, RoPE
+   (`rotate_half`) on only the first 64 of 256 dims (`partial_rotary_factor 0.25`, θ = 1e7; mRoPE collapses to
+   plain RoPE for text since all three position streams are equal), GQA 16/4, causal, then `· sigmoid(gate)`.
+4. Gated DeltaNet: `in_proj_qkv` → causal depthwise conv (kernel 4, no bias) → SiLU; q, k L2-normalised
+   (eps 1e-6), q scaled by `dk^-0.5`; value head `h` reads key head `h / 2` (`repeat_interleave`);
+   `g = −exp(A_log)·softplus(a + dt_bias)`, `β = sigmoid(b)`; state `S ← S·e^g; S += k ⊗ β(v − Sᵀk); o = Sᵀq`.
+   transformers runs the chunked form for a prefill; the recurrence here is algebraically identical.
+5. Tied LM head; only the label rows are ever multiplied.
+
+Rules that apply on top of the porting rules above:
+
+- **Weights stay bf16** (`PackedMatrixBf16`, ~7.8 GiB) and are widened inside the GEMM — exact, so compute
+  is still fp32. 4.2B parameters as fp32 do not fit in the 15 GB this was developed on.
+- **Parity is judged against fp64, not just torch fp32.** `tools/dump_mica_reference.py tiny` writes a tiny
+  random Qwen3.5 (committed, `Fixtures/qwen35-tiny`) with an fp32 and an fp64 run; `Qwen35ParityTests`
+  requires every layer to be within 2× of torch fp32's own distance from fp64. For the real checkpoint,
+  `dump_mica_reference.py checkpoint` runs transformers' `Qwen3_5DecoderLayer` one layer at a time in fp32
+  into `artifacts/dumps/<name>/`, and `MicaCheckpointParityTests` compares every layer: currently ≤ 1.4e-5
+  relative per layer and ≤ 5e-6 absolute on the probabilities.
+- **A state read in pieces is bit-identical to reading it at once** (`ReadingInPiecesIsExactlyReadingAtOnce`).
+  `MicaJudge` relies on it: rows share their longest common token prefix, read once, and each row rewinds
+  to it (`Qwen35State.Save/Rewind` copies only the small DeltaNet state; the KV cache is overwritten).
+- The contract fixtures (`Fixtures/mica-contract-cases.json`) are Mica's own; `MicaContractTests` checks rows,
+  every rendered prompt byte for byte, typed results and the invalid-request list against them.
+
+Checkpoint files: hub `sky7350/Mica-v0.5-4B` pinned to `MicaCheckpoint.HubRevision` (config, two bf16 shards +
+index, tokenizer; the repo's GGUF/INT8 files are excluded by an exact-name filter). `laya mica-convert` writes
+the host layout — `config.json`, `calibration.json`, `tokenizer.json`, `tokenizer_config.json` and a single
+text-only `model.safetensors` (bf16 bytes copied unchanged) — for `https://models.curiosity.ai/laya/mica/main/`.
+
 ## Target frameworks
 
 `net10.0;net11.0`. The `net11.0` target is only added when an 11.x SDK is actually installed (see
@@ -261,6 +309,13 @@ model; parity tests are skipped when `artifacts/` is empty.
 - Attention's inner loops must not end in a horizontal reduction. Gather the keys **transposed** so
   adjacent keys occupy adjacent lanes; a score vector then finishes with a store rather than a
   shuffle chain. Worth 1.6x on the encoder's attention.
+- **`InvariantGlobalization` makes `string.Normalize` a no-op outside ASCII.** NFC therefore went
+  silently missing: `e` + U+0301 reached BPE as two code points and the ids differed from `tokenizers`.
+  `UnicodeNfc` is a managed NFC over tables generated by `tools/gen_unicode_nfc.py`; never go back to
+  `string.Normalize` in a tokenizer.
+- .NET's regex works on UTF-16 code units, so `\p{L}` never matches a letter outside the BMP. The Qwen3.5
+  pre-tokenizer regex is matched by a hand-written scanner over runes (`Qwen35Pattern`); any new
+  `Split` pattern that matters needs the same treatment, checked against `tokenizers` on astral text.
 - `ForwardTiming.Stage` is idempotent for a reason: `using var stage = …` plus an explicit
   `stage.Dispose()` recorded the stage twice, the second time spanning to the end of the enclosing
   method. It made one stage look six times more expensive than it was and sent me optimizing the

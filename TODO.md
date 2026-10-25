@@ -74,6 +74,18 @@ Status key: `[ ]` not started · `[~]` in progress · `[x]` done
 - [ ] Save optimizer state with the rolling checkpoint so a run can resume (the notebook cannot either)
 - [ ] Data parallelism across processes, the notebook's DDP
 
+## 9. Mica v0.5 4B (`Laya.Mica`, Qwen3.5 decoder)
+- [x] Qwen3.5 tokenizer: `Split` pre-tokenizer (hand-matched regex over runes), managed NFC
+- [x] bf16-resident panel GEMM (`PackedMatrixBf16`), sharded safetensors (`SafetensorsCheckpoint`)
+- [x] `Qwen35Model`: Gated DeltaNet, gated full attention with partial RoPE, SwiGLU, tied head
+- [x] Resumable decoder state; shared-prefix reading in `MicaJudge`
+- [x] Contract, prompt, codebook, typed results — Mica's own fixtures pass (rows, 105 prompts, responses)
+- [x] Parity: tiny random model vs fp32 + fp64; real checkpoint layer by layer vs transformers fp32
+- [x] `laya mica`, `mica-dump`, `mica-convert`; hub download pinned to the validated revision
+- [ ] Upload the converted checkpoint to `models.curiosity.ai/laya/mica/main/` (then `--source host` works)
+- [ ] Speed: batch the per-question suffixes into one GEMM; transposed-key attention for long states
+- [ ] Long-input mode (`llama_set_upper_stale`) is an approximation upstream and is not ported
+
 ## Performance work
 - [x] Concatenated-batch forward pass — the weights are streamed once per call, not once per question
 - [x] Panel-packed weights + broadcast GEMM kernel

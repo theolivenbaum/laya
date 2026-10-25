@@ -50,6 +50,9 @@ internal static class Program
                 "train" => TrainCommands.Train(options, ModelDirectory),
                 "evaluate" => TrainCommands.Evaluate(options, ModelDirectory),
                 "calibrate" => TrainCommands.Calibrate(options, ModelDirectory),
+                "mica" => MicaCommands.Answer(options),
+                "mica-dump" => MicaCommands.Dump(options),
+                "mica-convert" => MicaCommands.Convert(options),
                 _ => Unknown(args[0]),
             };
         }
@@ -87,6 +90,16 @@ internal static class Program
           train         Fine-tune a checkpoint (RLCD objective, AdamW, temperature calibration)
           calibrate     Refit a checkpoint's temperatures on labelled cases (weights untouched)
           evaluate      Score a checkpoint on typed-decisions cases (accuracy, Brier, ECE, ...)
+          mica          Answer a /v1/systemone request with Mica v0.5 4B (Qwen3.5 decision model)
+          mica-dump     Write every Mica layer's output for parity checking
+          mica-convert  Write the text-only Mica checkpoint for the model host
+
+        MICA OPTIONS
+          --request <file>      A /v1/systemone request: {"state": …, "questions": {…}}
+          --request-json <json> The same, inline; or --text/--state-json/--state-file with
+          --questions <file>    … a questions object (or --questions-json)
+          --source <where>      hub | host   (default: hub — sky7350/Mica-v0.5-4B)
+          --out <dir>           mica-dump / mica-convert output directory
 
         COMMON OPTIONS
           --model <name>        english | multilingual | typed-decisions   (default: english)
@@ -130,6 +143,9 @@ internal static class Program
           laya train --model english --data artifacts/data/LocalLLaMA_typed-decisions.all.train.jsonl \
                      --out artifacts/models/my-typed-decisions --train-layers 4 --eval
           laya evaluate --model-dir artifacts/models/my-typed-decisions --split test
+          laya mica --text "The door is locked." \
+                    --questions-json '{"open": {"type": "noul", "instructions": "Is the door open?"}}'
+          laya mica-convert --model-dir artifacts/models/mica --out artifacts/upload/mica
           laya dump-states --model-dir ./artifacts/models/english \
                            --text "hello" --question noul:"Is this a greeting?" \
                            --out artifacts/dumps/dotnet.json
@@ -301,6 +317,7 @@ internal static class Program
     /// </summary>
     private static string DownloadCheckpoint(CommandLine options)
     {
+        if (string.Equals(options.Value("model"), "mica", StringComparison.OrdinalIgnoreCase)) return MicaCommands.Directory(options);
         var progress = new ConsoleProgress();
         if (!UsesHub(options))
         {
@@ -391,7 +408,7 @@ internal static class Program
     /// carriage return to redraw with, so it falls back to one line per 10% — otherwise a log file
     /// collects a line per megabyte.
     /// </summary>
-    private sealed class ConsoleProgress : IProgress<DownloadProgress>
+    internal sealed class ConsoleProgress : IProgress<DownloadProgress>
     {
         private static readonly bool Interactive = !Console.IsErrorRedirected;
 
