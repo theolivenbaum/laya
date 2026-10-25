@@ -147,12 +147,20 @@ public sealed class PackedMatrixQ8_0 : ILinear
         : this(outFeatures, inFeatures)
     {
         if (rowMajorBf16.Length < (long)outFeatures * inFeatures) throw new ArgumentException("too few weights", nameof(rowMajorBf16));
-        var row = new float[inFeatures];
-        for (int c = 0; c < outFeatures; ++c)
+        unsafe
         {
-            var source = rowMajorBf16.Slice(c * inFeatures, inFeatures);
-            for (int i = 0; i < inFeatures; ++i) row[i] = BitConverter.UInt32BitsToSingle((uint)source[i] << 16);
-            Pack(c, row);
+            fixed (ushort* bits = rowMajorBf16)
+            {
+                // Columns are quantized independently and land in disjoint bytes, so they can go in parallel.
+                nint address = (nint)bits;
+                Parallel.For(0, outFeatures, () => new float[inFeatures], (c, _, row) =>
+                {
+                    var source = new ReadOnlySpan<ushort>((ushort*)address + (long)c * inFeatures, inFeatures);
+                    for (int i = 0; i < inFeatures; ++i) row[i] = BitConverter.UInt32BitsToSingle((uint)source[i] << 16);
+                    Pack(c, row);
+                    return row;
+                }, _ => { });
+            }
         }
     }
 
