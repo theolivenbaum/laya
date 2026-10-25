@@ -234,6 +234,27 @@ Measured and **rejected**:
 | int8 via `AvxVnni` `vpdpbusd` ymm (all .NET 10 exposes) | 56–60 G MAC/s: no faster than bf16 |
 | int8 via `AvxVnni.V512` `vpdpbusd` zmm (.NET 11 only) | register roof 72 G MAC/s, 6×4 tile 73: one instruction per ~2 cycles (single port) against two FMA ports. At most ~1.2× on the GEMMs before activation quantization, inexact, preview SDK — not worth it. Revisit on a CPU with AMX or two VNNI ports |
 
+### What upstream's quantizations cost
+
+TensorSharp runs this family from GGUF (Q8_0, Unsloth's Q4_K_XL/Q4_K_M, IQ2_XXS, NVFP4); Mica publishes
+`mica-v0.5-4b-Q8_0.gguf` and `mica-v0.5-4b-IQ4_XS.gguf` (IQ4_XS matrices, Q5_K `in_proj_qkv`/`v_proj`, Q6_K
+embedding). `tools/measure_mica_quant.py` runs the 105 fixture prompts (52k tokens) layer by layer in fp32 with
+each file's matrices dequantized (`-w`), and also with ggml's CPU activation quantization (Q8_0 / Q8_K) on every
+matmul input (`-wa`, what llama.cpp computes; its f16 KV cache is not emulated). Against the exact path:
+
+| variant | mean \|Δp\| | p90 | worst | mean KL | same top-1 |
+|---|---|---|---|---|---|
+| Q8_0 weights | 0.0035 | 0.010 | 0.029 | 1.6e-4 | 100% |
+| Q8_0 as ggml runs it | 0.0060 | 0.018 | 0.060 | 4.2e-4 | 100% |
+| IQ4_XS weights | 0.037 | 0.113 | 0.413 | 1.7e-2 | 96.2% |
+| IQ4_XS as ggml runs it | 0.040 | 0.152 | 0.399 | 1.8e-2 | 96.2% |
+
+Q8_0's error is ~1000× the C# port's own (5e-6) but never changes an answer. IQ4_XS flips 4 of 105 answers (all
+near-ties, ≤ 0.58 confident) and flattens confident ones (0.81 → 0.58 on `multi_26`), which matters because the
+probabilities are the calibrated output. The weight error dominates: activation quantization adds little.
+llama.cpp's converter reorders the DeltaNet value heads (tiled vs `repeat_interleave`) and bakes `1 + w` into the
+norms; the tool matches heads back block by block and checks every matrix's error (Q8_0 0.54%, IQ4_XS ~7.8%).
+
 Checkpoint files: hub `sky7350/Mica-v0.5-4B` pinned to `MicaCheckpoint.HubRevision` (config, two bf16 shards +
 index, tokenizer; the repo's GGUF/INT8 files are excluded by an exact-name filter). `laya mica-convert` writes
 the host layout — `config.json`, `calibration.json`, `tokenizer.json`, `tokenizer_config.json` and a single
