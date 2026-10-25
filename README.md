@@ -284,9 +284,21 @@ Questions about one state share their prompt up to the question, so that prefix 
 each question continues from a copy of the decoder state — the same activations as reading each
 prompt alone, at a fraction of the cost.
 
-What it costs: 7.8 GiB of resident weights (they stay bf16; fp32 would not fit next to anything
-else), about 30 s to load, and on the 4-core Xeon this port is developed on, 6 s for a 240-token
-state with two questions. That is a model for a background decision, not for every keystroke.
+What it costs: 7.8 GiB of resident weights (they stay bf16; fp32 would not fit next to anything else) and
+about 30 s to load. Measured on a 4-core Xeon, against transformers' own Qwen3.5 on the same CPU and the same
+token ids (`laya mica-bench`, `tools/bench_mica_python.py`):
+
+| | this port | PyTorch fp32 | PyTorch bf16 |
+|---|---|---|---|
+| one forward pass, 219 tokens | **4.3 s** | 5.4–6.3 s (1.3–1.45×) | 16.4 s (3.8×) |
+| one question, 173 tokens | **2.6 s** | 4.3 s (1.66×) | |
+| three questions about one state, 615 tokens | **5.2 s** | 15.5 s (3.0×) | |
+| a multi-answer choice and a yes/no, 731 tokens | **6.7 s** | 18.2 s (2.7×) | |
+
+PyTorch reads every question's prompt in full; this port, like Mica's own server, reads the shared prompt
+header once at load, the common part of a request's prompts once, all of a request's questions in one batched
+pass, and keeps the last state for a follow-up question — with bit-identical results. That is a model for a
+background decision, not for every keystroke.
 
 | | |
 |---|---|

@@ -83,7 +83,10 @@ Status key: `[ ]` not started · `[~]` in progress · `[x]` done
 - [x] Parity: tiny random model vs fp32 + fp64; real checkpoint layer by layer vs transformers fp32
 - [x] `laya mica`, `mica-dump`, `mica-convert`; hub download pinned to the validated revision
 - [ ] Upload the converted checkpoint to `models.curiosity.ai/laya/mica/main/` (then `--source host` works)
-- [ ] Speed: batch the per-question suffixes into one GEMM; transposed-key attention for long states
+- [x] Speed: state-buffer pooling, subnormal-decay flush, fused delta-rule kernel, batched questions, in-pass
+      snapshots, header/state caches, warm start, K-blocked bf16 GEMM — 1.3–1.45× PyTorch fp32 per pass, 1.7–3×
+      per request, ~4× PyTorch bf16
+- [ ] Speed: transposed-key attention for long states (attention is ~2% at 200 tokens, more at 32k)
 - [ ] Long-input mode (`llama_set_upper_stale`) is an approximation upstream and is not ported
 
 ## Performance work

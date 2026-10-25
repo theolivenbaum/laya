@@ -199,6 +199,38 @@ Rules that apply on top of the porting rules above:
 - The contract fixtures (`Fixtures/mica-contract-cases.json`) are Mica's own; `MicaContractTests` checks rows,
   every rendered prompt byte for byte, typed results and the invalid-request list against them.
 
+### Mica performance
+
+Measured with `laya mica-bench` against `tools/bench_mica_python.py` (transformers on the same CPU, same token
+ids, 4 threads; shut down build servers first — a lingering `MSBuild`/`VBCSCompiler` swung both sides by 15%).
+On the 4-core Xeon: a 219-token prompt reads in 4.3 s (PyTorch fp32, one layer resident at a time, 5.4–6.3 s;
+bf16, what Mica's own HF runtime uses, 16.4 s); a three-question request in 5.2 s against 15.5 s for one PyTorch
+forward per question. The GEMMs are ~92% of a pass and run at ~120 GFLOP/s per core, ~82% of the FMA roof.
+
+What made the difference, all exact:
+
+- **Fresh state memory costs page faults**: 48 MB of DeltaNet state per `Qwen35State` took 380 ms to first-touch,
+  as long as the whole recurrence. States, snapshots and KV caches come from `StateBufferPool`; dispose them.
+- **Subnormal decays**: heads with `exp(A_log)` up to 75 give `exp(g) < 1.2e-38`; multiplying the state by it took
+  a microcode assist per element and those heads serialised the recurrence. They are flushed to 0 (the product is
+  absorbed by `k ⊗ δ` anyway). One thread and four were equally fast before — that is how it showed.
+- **The fused delta-rule kernel** (`DecoderKernels.GatedDeltaRule128`): one sweep of the state per token with δ, o
+  and m in zmm registers; bit-identical to the two-sweep form (`DeltaRuleTests`).
+- **Weights stream once per pass**, ~0.33 s for 8 GB whatever the row count. So questions are batched into one pass
+  (`Forward(IReadOnlyList<Qwen35Sequence>)`), cache snapshots are taken as in-pass checkpoints rather than by
+  splitting the read, and the header is read at load (`MicaJudge.Warm`, Mica's `start_warm`).
+- K-blocking the bf16 GEMM at 4096 (the 9216-wide down projection's panel no longer fits L2), padding row counts to
+  the 6-row tile, splitting rows when a projection has few panels, last-layer pruning.
+
+Measured and **rejected**:
+
+| idea | result |
+|---|---|
+| Widen each 64×64 bf16 weight block once into an L1 fp32 buffer, then a pure-FMA loop | 102–119 GFLOP/s vs 120–126 streaming: the inline widening was not the limit |
+| fp32 weights instead of bf16 (where memory allows) | 84 vs 122 GFLOP/s per core: the bf16 kernel is faster, it halves L2 traffic |
+| Flushing decays below 1e-10 (not just subnormals) | no change: tiny normal decays were never the problem, and it would not be exact |
+| Padding the 9216-float activation stride off a 4 KB multiple | no change |
+
 Checkpoint files: hub `sky7350/Mica-v0.5-4B` pinned to `MicaCheckpoint.HubRevision` (config, two bf16 shards +
 index, tokenizer; the repo's GGUF/INT8 files are excluded by an exact-name filter). `laya mica-convert` writes
 the host layout — `config.json`, `calibration.json`, `tokenizer.json`, `tokenizer_config.json` and a single
@@ -226,7 +258,12 @@ dotnet run --project src/StructuredDecisions.Cli -c Release -- profile \
 # 2. Which method is on the CPU? (drops --no-trace: in-process sampling via Memory.Introspect)
 dotnet run --project src/StructuredDecisions.Cli -c Release -- profile --model-dir … --preset triage --text "…"
 
-# 3. Steady-state numbers for one kernel
+# 3. Mica: the forward pass and whole requests against the Python reference
+dotnet run --project src/StructuredDecisions.Cli -c Release -- mica-bench --model-dir artifacts/models/mica --stages
+dotnet run --project src/StructuredDecisions.Cli -c Release -- mica-bench --model-dir artifacts/models/mica \
+    --requests artifacts/dumps/gate-request.json artifacts/dumps/rag-request.json
+
+# 4. Steady-state numbers for one kernel
 dotnet run --project benchmarks/StructuredDecisions.Benchmarks -c Release -- --filter '*Gemm*'
 ```
 

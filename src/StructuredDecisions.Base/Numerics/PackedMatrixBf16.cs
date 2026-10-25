@@ -27,6 +27,9 @@ public sealed class PackedMatrixBf16 : ILinear
     private readonly int _panels;
     private readonly int _panelStride;
 
+    /// <summary>Token rows the kernel computes per pass; callers that can pad their row count to a multiple of it should.</summary>
+    public const int RowTile = 6;
+
     public int InFeatures { get; }
     public int OutFeatures { get; }
     public long Bytes => (long)_data.Length * sizeof(ushort);
@@ -99,40 +102,69 @@ public sealed class PackedMatrixBf16 : ILinear
 
             nint weightAddress = (nint)weights, inputAddress = (nint)inputPointer;
             nint biasAddress = (nint)bias0, outputAddress = (nint)outputPointer;
-            int chunk = Math.Max(1, _panels / (workers * 4));
-            int chunks = (_panels + chunk - 1) / chunk;
+            // A projection to 2560 outputs is only 40 panels: ten per worker on four cores, so whoever draws the
+            // last ones idles the others. Below a few panels per worker the rows are split too, in whole tiles —
+            // each row is computed independently, so the split changes no value.
+            int rowGroups = 1;
+            while (_panels * rowGroups < workers * 8 && rows / (rowGroups * 2) >= 4 * RowTile) rowGroups *= 2;
+            int groupRows = (rows / rowGroups + RowTile - 1) / RowTile * RowTile;
+            int chunk = Math.Max(1, _panels * rowGroups / (workers * 4));
+            int items = _panels * rowGroups;
+            int chunks = (items + chunk - 1) / chunk;
+            int inStride = inputStride, outStride = outputStride, rowCount = rows;
             Parallel.For(0, chunks, DecisionRuntime.Resolve(parallel), index =>
             {
-                int last = Math.Min(_panels, (index + 1) * chunk);
-                for (int panel = index * chunk; panel < last; ++panel)
+                int last = Math.Min(items, (index + 1) * chunk);
+                for (int item = index * chunk; item < last; ++item)
                 {
-                    Panel((ushort*)weightAddress, (float*)inputAddress, rows, inputStride, (float*)biasAddress,
-                        (float*)outputAddress, outputStride, panel);
+                    int panel = item / rowGroups, group = item % rowGroups;
+                    int r0 = group * groupRows, r1 = Math.Min(rowCount, r0 + groupRows);
+                    if (r0 >= r1) continue;
+                    Panel((ushort*)weightAddress, (float*)inputAddress + (long)r0 * inStride, r1 - r0, inStride, (float*)biasAddress,
+                        (float*)outputAddress + (long)r0 * outStride, outStride, panel);
                 }
             });
         }
     }
 
+    /// <summary>
+    /// The longest stretch of the reduction one pass over a panel covers. A 64-column panel of a 9216-wide
+    /// input is 1.18 MB of bf16 — more than this core's 1 MB L2 — so the down projection streamed its
+    /// weights from L3 for every row block (105 GFLOP/s against 122 for the 2560-wide projections). Cut
+    /// into 3072-step slices, each slice stays in L2 while every row block passes over it; the next slice
+    /// resumes from the partial sums in the output. The accumulation order per output is unchanged —
+    /// a float stored and reloaded is the same float — so the result is bit-identical.
+    /// </summary>
+    private const int ReductionBlock = 4096;
+
     private unsafe void Panel(ushort* weights, float* input, int rows, int inputStride, float* bias,
         float* output, int outputStride, int panel)
     {
         int columns = Math.Min(_panelWidth, OutFeatures - panel * _panelWidth);
-        if (columns != _panelWidth) PanelRagged(weights, input, rows, inputStride, bias, output, outputStride, panel, columns);
-        else if (SimdOps.UseVector512) Panel512(weights, input, rows, inputStride, bias, output, outputStride, panel);
-        else PanelPortable(weights, input, rows, inputStride, bias, output, outputStride, panel);
+        int blocks = (InFeatures + ReductionBlock - 1) / ReductionBlock;
+        int step = (InFeatures + blocks - 1) / blocks;
+        for (int k0 = 0; k0 < InFeatures; k0 += step)
+        {
+            int k1 = Math.Min(InFeatures, k0 + step);
+            bool resume = k0 > 0;
+            if (columns != _panelWidth) PanelRagged(weights, input, rows, inputStride, bias, output, outputStride, panel, columns, k0, k1, resume);
+            else if (SimdOps.UseVector512) Panel512(weights, input, rows, inputStride, bias, output, outputStride, panel, k0, k1, resume);
+            else PanelPortable(weights, input, rows, inputStride, bias, output, outputStride, panel, k0, k1, resume);
+        }
     }
 
     /// <summary>64 outputs by six rows, as in <see cref="PackedMatrix"/>; two loads widen into four vectors.</summary>
     [MethodImpl(MethodImplOptions.AggressiveOptimization)]
     private unsafe void Panel512(ushort* weights, float* input, int rows, int inputStride, float* bias,
-        float* output, int outputStride, int panel)
+        float* output, int outputStride, int panel, int k0, int k1, bool resume)
     {
         const int width = 16;
         const int panelWidth = 4 * width;
         const int rowBlock = 6;
-        int features = InFeatures;
+        int features = k1 - k0;
         int n0 = panel * panelWidth;
-        uint* panelBase = (uint*)(weights + (long)panel * _panelStride);
+        uint* panelBase = (uint*)(weights + (long)panel * _panelStride + (long)k0 * panelWidth);
+        input += k0;
         var high = Vector512.Create(0xFFFF0000u);
 
         var seed0 = bias is null ? Vector512<float>.Zero : Vector512.Load(bias + n0 + 0 * width);
@@ -149,6 +181,22 @@ public sealed class PackedMatrixBf16 : ILinear
             var c30 = seed0; var c31 = seed1; var c32 = seed2; var c33 = seed3;
             var c40 = seed0; var c41 = seed1; var c42 = seed2; var c43 = seed3;
             var c50 = seed0; var c51 = seed1; var c52 = seed2; var c53 = seed3;
+            if (resume)
+            {
+                // Continue the partial sums the previous reduction slice left in the output.
+                float* r = output + (long)row * outputStride + n0;
+                c00 = Vector512.Load(r); c01 = Vector512.Load(r + width); c02 = Vector512.Load(r + 2 * width); c03 = Vector512.Load(r + 3 * width);
+                r += outputStride;
+                c10 = Vector512.Load(r); c11 = Vector512.Load(r + width); c12 = Vector512.Load(r + 2 * width); c13 = Vector512.Load(r + 3 * width);
+                r += outputStride;
+                c20 = Vector512.Load(r); c21 = Vector512.Load(r + width); c22 = Vector512.Load(r + 2 * width); c23 = Vector512.Load(r + 3 * width);
+                r += outputStride;
+                c30 = Vector512.Load(r); c31 = Vector512.Load(r + width); c32 = Vector512.Load(r + 2 * width); c33 = Vector512.Load(r + 3 * width);
+                r += outputStride;
+                c40 = Vector512.Load(r); c41 = Vector512.Load(r + width); c42 = Vector512.Load(r + 2 * width); c43 = Vector512.Load(r + 3 * width);
+                r += outputStride;
+                c50 = Vector512.Load(r); c51 = Vector512.Load(r + width); c52 = Vector512.Load(r + 2 * width); c53 = Vector512.Load(r + 3 * width);
+            }
 
             float* a0 = input + (long)(row + 0) * inputStride;
             float* a1 = input + (long)(row + 1) * inputStride;
@@ -215,6 +263,11 @@ public sealed class PackedMatrixBf16 : ILinear
         for (; row < rows; ++row)
         {
             var t0 = seed0; var t1 = seed1; var t2 = seed2; var t3 = seed3;
+            if (resume)
+            {
+                float* r = output + (long)row * outputStride + n0;
+                t0 = Vector512.Load(r); t1 = Vector512.Load(r + width); t2 = Vector512.Load(r + 2 * width); t3 = Vector512.Load(r + 3 * width);
+            }
             float* a0 = input + (long)row * inputStride;
             uint* w = panelBase;
             for (int i = 0; i < features; ++i, w += 2 * width)
@@ -235,13 +288,14 @@ public sealed class PackedMatrixBf16 : ILinear
     /// <summary>The same kernel over the portable vector width: one load widens into the panel's two vectors.</summary>
     [MethodImpl(MethodImplOptions.AggressiveOptimization)]
     private unsafe void PanelPortable(ushort* weights, float* input, int rows, int inputStride, float* bias,
-        float* output, int outputStride, int panel)
+        float* output, int outputStride, int panel, int k0, int k1, bool resume)
     {
         int width = Vector<float>.Count;
         const int rowBlock = 6;
-        int features = InFeatures;
+        int features = k1 - k0;
         int n0 = panel * _panelWidth;
-        uint* panelBase = (uint*)(weights + (long)panel * _panelStride);
+        uint* panelBase = (uint*)(weights + (long)panel * _panelStride + (long)k0 * _panelWidth);
+        input += k0;
         var high = new Vector<uint>(0xFFFF0000u);
 
         var seed0 = bias is null ? Vector<float>.Zero : Vector.Load(bias + n0);
@@ -256,6 +310,16 @@ public sealed class PackedMatrixBf16 : ILinear
             var c30 = seed0; var c31 = seed1;
             var c40 = seed0; var c41 = seed1;
             var c50 = seed0; var c51 = seed1;
+            if (resume)
+            {
+                float* r = output + (long)row * outputStride + n0;
+                c00 = Vector.Load(r); c01 = Vector.Load(r + width); r += outputStride;
+                c10 = Vector.Load(r); c11 = Vector.Load(r + width); r += outputStride;
+                c20 = Vector.Load(r); c21 = Vector.Load(r + width); r += outputStride;
+                c30 = Vector.Load(r); c31 = Vector.Load(r + width); r += outputStride;
+                c40 = Vector.Load(r); c41 = Vector.Load(r + width); r += outputStride;
+                c50 = Vector.Load(r); c51 = Vector.Load(r + width);
+            }
 
             float* a0 = input + (long)(row + 0) * inputStride;
             float* a1 = input + (long)(row + 1) * inputStride;
@@ -306,8 +370,8 @@ public sealed class PackedMatrixBf16 : ILinear
 
         for (; row < rows; ++row)
         {
-            var c0 = seed0;
-            var c1 = seed1;
+            var c0 = resume ? Vector.Load(output + (long)row * outputStride + n0) : seed0;
+            var c1 = resume ? Vector.Load(output + (long)row * outputStride + n0 + width) : seed1;
             float* a0 = input + (long)row * inputStride;
             uint* w = panelBase;
             for (int i = 0; i < features; ++i, w += width)
@@ -325,7 +389,7 @@ public sealed class PackedMatrixBf16 : ILinear
 
     [MethodImpl(MethodImplOptions.NoInlining)]
     private unsafe void PanelRagged(ushort* weights, float* input, int rows, int inputStride, float* bias,
-        float* output, int outputStride, int panel, int columns)
+        float* output, int outputStride, int panel, int columns, int k0, int k1, bool resume)
     {
         int n0 = panel * _panelWidth;
         ushort* panelBase = weights + (long)panel * _panelStride;
@@ -339,9 +403,9 @@ public sealed class PackedMatrixBf16 : ILinear
             for (int j = 0; j < columns; ++j)
             {
                 // The same products in the same order as the vector kernels, one FMA at a time.
-                float sum = bias is null ? 0f : bias[n0 + j];
-                ushort* w = panelBase + slots[j];
-                for (int i = 0; i < InFeatures; ++i, w += _panelWidth)
+                float sum = resume ? destination[j] : bias is null ? 0f : bias[n0 + j];
+                ushort* w = panelBase + slots[j] + (long)k0 * _panelWidth;
+                for (int i = k0; i < k1; ++i, w += _panelWidth)
                 {
                     sum = MathF.FusedMultiplyAdd(a[i], BitConverter.UInt32BitsToSingle((uint)*w << 16), sum);
                 }

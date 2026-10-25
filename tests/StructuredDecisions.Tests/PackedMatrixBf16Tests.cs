@@ -11,6 +11,8 @@ public class PackedMatrixBf16Tests
     [InlineData(7, 130, 33)]
     [InlineData(13, 256, 100)]
     [InlineData(6, 12352, 64)]
+    [InlineData(30, 128, 100)]      // the blocked kernel: whole tiles, a ragged tail, a partial 64-step slice
+    [InlineData(219, 192, 9216)]    // and several reduction blocks
     public void MatchesTheWidenedFp32Kernel(int rows, int outFeatures, int inFeatures)
     {
         var random = new Random(rows * 31 + outFeatures);
@@ -32,9 +34,14 @@ public class PackedMatrixBf16Tests
         new PackedMatrix(widened, outFeatures, inFeatures).Multiply(input, rows, bias, expected);
         new PackedMatrixBf16(bits, outFeatures, inFeatures).Multiply(input, rows, bias, actual);
 
+        // Every vector path sums the same products in the same order with FMA, so whole panels are identical, not
+        // close. The ragged last panel is scalar in both classes, FMA in one and multiply-add in the other.
+        int panelWidth = SimdOps.UseVector512 ? 64 : 2 * System.Numerics.Vector<float>.Count;
+        int whole = outFeatures / panelWidth * panelWidth;
         for (int i = 0; i < expected.Length; ++i)
         {
-            Assert.True(MathF.Abs(expected[i] - actual[i]) <= 1e-5f * (1 + MathF.Abs(expected[i])), $"{i}: {expected[i]} vs {actual[i]}");
+            if (i % outFeatures < whole) Assert.True(expected[i] == actual[i], $"{i}: {expected[i]} vs {actual[i]}");
+            else Assert.True(MathF.Abs(expected[i] - actual[i]) <= 1e-5f * (1 + MathF.Abs(expected[i])), $"{i}: {expected[i]} vs {actual[i]}");
         }
     }
 }

@@ -55,6 +55,7 @@ internal static class Program
                 "mica" => MicaCommands.Answer(options),
                 "mica-dump" => MicaCommands.Dump(options),
                 "mica-convert" => MicaCommands.Convert(options),
+                "mica-bench" => MicaCommands.Bench(options),
                 _ => Unknown(args[0]),
             };
         }
@@ -95,6 +96,7 @@ internal static class Program
           mica          Answer a /v1/systemone request with Mica v0.5 4B (Qwen3.5 decision model)
           mica-dump     Write every Mica layer's output for parity checking
           mica-convert  Write the text-only Mica checkpoint for the model host
+          mica-bench    Time Mica's forward pass against the Python reference timings
 
         MICA OPTIONS
           --request <file>      A /v1/systemone request: {"state": …, "questions": {…}}

@@ -140,3 +140,60 @@ public class Qwen35StateTests
         Assert.Equal(model.Forward([.. prefix, .. b], model.NewState()), second);
     }
 }
+
+public class Qwen35BatchTests
+{
+    private static Qwen35Model Model()
+    {
+        string fixture = Path.Combine(TestModels.FixtureRoot, "qwen35-tiny");
+        using var checkpoint = new SafetensorsCheckpoint(fixture);
+        return new Qwen35Model(Qwen35Config.Load(Path.Combine(fixture, "config.json")), checkpoint);
+    }
+
+    private static int[] Tokens(int count, int seed) => [.. Enumerable.Range(0, count).Select(i => (i * 37 + seed * 11) % 128)];
+
+    /// <summary>Sequences read together in one pass get exactly what each gets alone, chunk boundaries included.</summary>
+    [Theory]
+    [InlineData(1024)]
+    [InlineData(23)]
+    public void ABatchReadsEachSequenceExactlyAsAlone(int rowsPerChunk)
+    {
+        var model = Model();
+        model.RowsPerChunk = rowsPerChunk;
+        int[] prefix = Tokens(50, 1);
+        int[][] suffixes = [Tokens(7, 2), Tokens(1, 3), Tokens(30, 4)];
+
+        var expected = suffixes.Select(s => model.Forward([.. prefix, .. s], model.NewState())).ToArray();
+
+        using var shared = model.NewState();
+        model.Read(prefix, shared);
+        var branches = suffixes.Select(s => new Qwen35Sequence { Tokens = s, State = shared.Clone() }).ToArray();
+        model.Forward(branches);
+        for (int i = 0; i < suffixes.Length; ++i)
+        {
+            Assert.Equal(expected[i], branches[i].Hidden);
+            Assert.Equal(prefix.Length + suffixes[i].Length, branches[i].State.Length);
+        }
+    }
+
+    /// <summary>A snapshot taken during a pass is the state a separate read up to that point would leave.</summary>
+    [Fact]
+    public void CheckpointsAreTheStatesOfShorterReads()
+    {
+        var model = Model();
+        model.RowsPerChunk = 16;
+        int[] tokens = Tokens(60, 5), rest = Tokens(9, 6);
+        var sequence = new Qwen35Sequence { Tokens = tokens, State = model.NewState(), Readout = false, Checkpoints = [5, 16, 33] };
+        model.Forward([sequence]);
+
+        for (int k = 0; k < 3; ++k)
+        {
+            int at = sequence.Checkpoints![k];
+            Assert.Equal(at, sequence.Snapshots![k].Length);
+            // Continuing from the snapshot and continuing from a state that read exactly that far agree bit for bit.
+            var reference = model.NewState();
+            model.Read(tokens.AsSpan(0, at), reference);
+            Assert.Equal(model.Forward(rest, reference), model.Forward(rest, sequence.Snapshots[k]));
+        }
+    }
+}
