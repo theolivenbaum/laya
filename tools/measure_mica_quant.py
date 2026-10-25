@@ -144,8 +144,7 @@ def load_prompts(tokenizer):
             labels = codebook["noul_labels"] if row["kind"] == "noul" else codebook["option_labels"][:len(row["candidates"])]
             ids = tokenizer(prompt, add_special_tokens=False).input_ids
             label_ids = [tokenizer.encode(l, add_special_tokens=False)[0] for l in labels]
-            items.append({"case": case["name"], "row": r, "kind": row["kind"], "ids": ids, "label_ids": label_ids,
-                          "fixture": case["probabilities"][r]})
+            items.append({"case": case["name"], "row": r, "kind": row["kind"], "ids": ids, "label_ids": label_ids})
     return items
 
 
@@ -226,9 +225,11 @@ def main():
                         if err > 0.2:
                             raise RuntimeError(f"layer {i} {module_name}: relative error {err} - mapping is wrong")
                         matrices[g.name, module_name] = torch.from_numpy(q), qtype
-            for v in variants:
+            with torch.device("meta"):
                 layer = qm.Qwen3_5DecoderLayer(config, i).eval()
-                layer.load_state_dict(state, strict=True)
+            layer.load_state_dict({k: t.clone() for k, t in state.items()}, strict=True, assign=True)
+            for v in variants:
+                layer.load_state_dict(state, strict=True)      # back to the checkpoint's weights
                 hooks = []
                 if v != "fp32":
                     g, mode = by_name[v.rsplit("-", 1)[0]], v.rsplit("-", 1)[1]
@@ -247,8 +248,8 @@ def main():
                     hidden[v][p] = out[0] if isinstance(out, tuple) else out
                 for hk in hooks:
                     hk.remove()
-                del layer
-                gc.collect()
+            del layer
+            gc.collect()
             print(f"layer {i} ({kind}) done, {time.time() - start:.0f} s", flush=True)
             del state, matrices
 
@@ -270,8 +271,8 @@ def main():
                 "same_top1": bool(a.argmax() == b.argmax())}
 
     summary = {}
-    for v in variants + ["fixture"]:
-        rows = [compare(probabilities["fp32"][p], it["fixture"] if v == "fixture" else probabilities[v][p])
+    for v in variants:
+        rows = [compare(probabilities["fp32"][p], probabilities[v][p])
                 for p, it in enumerate(items)]
         d = np.array([r["max_abs"] for r in rows])
         kl = np.array([r["kl"] for r in rows])
